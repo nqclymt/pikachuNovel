@@ -908,10 +908,13 @@ class TaskManager:
             f"Python：{sys.executable}\n启动时间：{task.started_at}\n\n",
         )
         reported_warning = False
+        reference_rebuild_required = False
 
         env = os.environ.copy()
         env["HARNESS_NOVEL_HOME"] = str(self.store.root)
         env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         env["HARNESS_NOVEL_PROMPT_TRACE_FILE"] = str(
             self.task_dir / f"{task.id}.prompts.jsonl"
         )
@@ -929,6 +932,15 @@ class TaskManager:
             )
             assert process.stdout is not None
             for line in iter(process.stdout.readline, ""):
+                if any(
+                    marker in line
+                    for marker in (
+                        "参考小说源文件已变化",
+                        "检测到旧版参考拆解状态",
+                        "检测到旧版故事片段",
+                    )
+                ):
+                    reference_rebuild_required = True
                 if (
                     line.lstrip().startswith(("错误：", "Traceback"))
                     or "[LLMProvider] 调用失败" in line
@@ -942,7 +954,11 @@ class TaskManager:
                 task.exit_code = exit_code
                 if exit_code != 0:
                     task.status = "failed"
-                    task.message = f"执行失败（退出码 {exit_code}）"
+                    task.message = (
+                        "参考小说已变化，请重新拆解"
+                        if reference_rebuild_required
+                        else f"执行失败（退出码 {exit_code}）"
+                    )
                 elif reported_warning:
                     task.status = "succeeded_with_warnings"
                     task.message = "命令已结束，请检查日志中的提示"

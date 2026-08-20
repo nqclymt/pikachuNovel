@@ -1464,6 +1464,10 @@ function formForStep(step) {
           </label>
           <p id="reference-file-status" class="reference-file-status">${selectedFile ? `新文件：${escapeHtml(selectedFile.name)}（${Math.ceil(selectedFile.size / 1024).toLocaleString()} KB）` : (reference.isComplete ? "尚未选择新文件" : "无需重新上传，可直接重试尚未完成的拆解步骤")}</p>
           ${referenceScopeControls(defaultTarget, reference.isComplete && !selectedFile)}
+          <label class="reference-rebuild-option">
+            <input id="reference-rebuild" type="checkbox" />
+            <span><strong>清除已有拆解结果并重新拆解</strong><small>用于参考源文件已变化或旧版拆解状态。会删除单章事实卡、故事片段和参考小说结构，不会删除已上传的参考小说源文件。</small></span>
+          </label>
         </div>`;
     }
     const selectedFile = wizardState.referenceFile;
@@ -1544,6 +1548,22 @@ function bindDirectionSource() {
 function bindReferenceSource() {
   const hasExisting = referenceStatus().hasExisting;
   const fileInput = $("#reference-file-input");
+  const rebuildInput = $("#reference-rebuild");
+  const updateAction = () => {
+    const reference = referenceStatus();
+    const file = wizardState.referenceFile;
+    const rebuild = Boolean(rebuildInput?.checked);
+    const scope = $("#reference-scope");
+    const maxInput = $("#reference-max-chapters");
+    const action = $("#v0-step-form .primary-button");
+    if (scope) scope.disabled = !rebuild && !file && reference.isComplete;
+    if (maxInput) maxInput.disabled = wizardState.referenceScope !== "prefix" || (!rebuild && !file);
+    if (!action) return;
+    action.disabled = !rebuild && !file && reference.isComplete;
+    action.textContent = rebuild
+      ? "清除并重新拆解"
+      : (!file && hasExisting && !reference.isComplete ? "重试未完成步骤" : "导入并开始拆解");
+  };
   fileInput?.addEventListener("change", () => {
     wizardState.referenceFile = fileInput.files?.[0] || null;
     const status = $("#reference-file-status");
@@ -1552,10 +1572,9 @@ function bindReferenceSource() {
     const picker = $("#reference-file-picker");
     const label = $("#reference-file-label");
     const help = $("#reference-file-help");
-    const action = $("#v0-step-form .primary-button");
     if (scope) {
       scope.hidden = false;
-      scope.disabled = !file && referenceStatus().isComplete;
+      scope.disabled = !rebuildInput?.checked && !file && referenceStatus().isComplete;
     }
     if (picker) picker.classList.toggle("selected", Boolean(file));
     if (label) label.textContent = file ? "已选择新版整本小说" : (hasExisting ? "上传作者更新后的整本小说" : "导入小说内容");
@@ -1567,14 +1586,9 @@ function bindReferenceSource() {
       : (hasExisting
         ? (referenceStatus().isComplete ? "尚未选择新文件。" : "无需重新上传，可直接重试尚未完成的拆解步骤。")
         : "先选择小说文件，再设置拆解范围。");
-    if (action) {
-      action.disabled = !file && referenceStatus().isComplete;
-      action.textContent = !file && hasExisting && !referenceStatus().isComplete
-        ? "重试未完成步骤"
-        : "导入并开始拆解";
-    }
+    updateAction();
     const maxInput = $("#reference-max-chapters");
-    if (maxInput) maxInput.disabled = !file || wizardState.referenceScope !== "prefix";
+    if (maxInput) maxInput.disabled = (!file && !rebuildInput?.checked) || wizardState.referenceScope !== "prefix";
   });
   $$('input[name="reference-scope"]').forEach((input) => input.addEventListener("change", () => {
     if (!input.checked) return;
@@ -1583,6 +1597,7 @@ function bindReferenceSource() {
     maxInput.disabled = input.value !== "prefix";
     if (input.value === "prefix") maxInput.focus();
   }));
+  rebuildInput?.addEventListener("change", updateAction);
 }
 
 function bindWorldSource() {
@@ -1777,15 +1792,18 @@ async function submitStageStep() {
 async function submitReferenceStep() {
   if (!wizardState.workspace) throw new Error("请先选择工作区。");
   const reference = referenceStatus();
-  if (reference.isComplete && !wizardState.referenceFile) return;
+  const rebuild = Boolean($("#reference-rebuild")?.checked);
+  if (reference.isComplete && !wizardState.referenceFile && !rebuild) return;
+  if (rebuild && !window.confirm("重新拆解会清除已有的单章事实卡、故事片段和参考小说结构，并从头生成。已上传的参考小说源文件会保留。是否继续？")) return;
   const scope = $('input[name="reference-scope"]:checked')?.value || "all";
   const args = {};
   if (scope === "prefix") {
     const maxChapters = Number($("#reference-max-chapters")?.value);
     if (!Number.isInteger(maxChapters) || maxChapters < 1) throw new Error("请输入有效的拆解章节数。");
-    if (reference.hasExisting && maxChapters < reference.processed) throw new Error(`当前已拆解至第 ${reference.processed} 章，目标章节数不能更小。`);
+    if (reference.hasExisting && !rebuild && maxChapters < reference.processed) throw new Error(`当前已拆解至第 ${reference.processed} 章，目标章节数不能更小。`);
     args.max_chapters = maxChapters;
   }
+  if (rebuild) args.rebuild_reference = true;
   let taskType = "reference_resume";
   if (!reference.hasExisting) {
     if (!wizardState.referenceFile) throw new Error("请选择需要拆解的参考小说 TXT 文件。");
@@ -1794,7 +1812,10 @@ async function submitReferenceStep() {
   } else if (wizardState.referenceFile) {
     args.reference_upload_id = (await uploadFile(wizardState.referenceFile)).id;
   }
-  await startTask(taskType, args, reference.hasExisting ? "已开始继续拆解参考小说，可在任务日志中查看进度。" : "已开始导入并拆解参考小说，可在任务日志中查看编码识别与进度。");
+  const message = rebuild
+    ? "已开始重新拆解参考小说，旧拆解结果将由后台清理。"
+    : (reference.hasExisting ? "已开始继续拆解参考小说，可在任务日志中查看进度。" : "已开始导入并拆解参考小说，可在任务日志中查看编码识别与进度。");
+  await startTask(taskType, args, message);
   wizardState.referenceFile = null;
 }
 
@@ -2651,7 +2672,13 @@ async function refreshLog() {
       wizardState.lastSyncedTaskId = data.task.id;
       await refreshTasks();
       await refreshWorkspaceArtifacts();
-      showToast(data.task.status === "failed" ? "任务结束但未成功，请检查日志。" : "任务完成，生成内容已刷新。", data.task.status === "failed");
+      const rebuildRequired = data.task.status === "failed"
+        && data.task.type === "reference_resume"
+        && String(data.task.message || "").includes("重新拆解");
+      const message = rebuildRequired
+        ? "参考小说源文件已变化，请返回“参考小说”步骤，勾选“清除已有拆解结果并重新拆解”。"
+        : (data.task.status === "failed" ? "任务结束但未成功，请检查日志。" : "任务完成，生成内容已刷新。");
+      showToast(message, data.task.status === "failed");
     }
   } catch (_) { /* A server restart clears in-memory task metadata. */ }
 }

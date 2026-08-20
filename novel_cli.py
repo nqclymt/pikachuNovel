@@ -152,7 +152,7 @@ def _canonical_chapter_digest(chapter):
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _replace_reference_with_latest_snapshot(ws, incoming_path):
+def _replace_reference_with_latest_snapshot(ws, incoming_path, rebuild=False):
     """用作者最新整本快照替换源文件，并复用公共前缀的事实卡。"""
     import hashlib
     import json
@@ -173,7 +173,7 @@ def _replace_reference_with_latest_snapshot(ws, incoming_path):
     if not new_chapters:
         raise ValueError("上传文件中未识别到有效章节。")
 
-    reusable_limit = min(_reference_card_complete_count(ws), len(old_chapters))
+    reusable_limit = 0 if rebuild else min(_reference_card_complete_count(ws), len(old_chapters))
     common_prefix = 0
     for old_chapter, new_chapter in zip(old_chapters, new_chapters):
         if _canonical_chapter_digest(old_chapter) != _canonical_chapter_digest(new_chapter):
@@ -406,7 +406,11 @@ def cmd_reference_resume(args):
             print(f"错误：新版小说文件不存在：{args.txt}")
             return
         try:
-            snapshot = _replace_reference_with_latest_snapshot(ws, args.txt)
+            snapshot = _replace_reference_with_latest_snapshot(
+                ws,
+                args.txt,
+                rebuild=args.rebuild_reference,
+            )
         except ValueError as exc:
             print(f"错误：{exc}")
             return

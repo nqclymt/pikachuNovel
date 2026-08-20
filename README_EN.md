@@ -254,6 +254,9 @@ novel init my-new-novel --txt /path/to/reference-novel.txt --max-chapters 200
 # Continue later without uploading the source again.
 novel reference-resume my-new-novel --max-chapters 400
 
+# Rebuild derived reference assets when the source changed or the saved state is from an older pipeline.
+novel reference-resume my-new-novel --rebuild-reference
+
 # Import only, then choose full-book or first-N deconstruction later.
 novel init my-new-novel --txt /path/to/reference-novel.txt --no-analyze
 
@@ -391,7 +394,7 @@ Retrieval queries, ranked hits, source fragments, injected context, and post-dra
 | `novel desktop [--port PORT] [--workspace-root PATH]`                | Start the standalone desktop workbench           |
 | `novel list`                                                          | List all workspaces                              |
 | `novel init <ws> --txt <path> [--batch-size N] [--max-chapters N] [--no-analyze]` | Create a workspace, normalize the source, and run the three-stage deconstruction; `--no-analyze` imports only |
-| `novel reference-resume <ws> [--batch-size N] [--max-chapters N]` | Resume or retry reference deconstruction |
+| `novel reference-resume <ws> [--batch-size N] [--max-chapters N] [--rebuild-reference]` | Resume, retry, or rebuild reference deconstruction |
 | `novel world-import <ws> <paths...> [--force]`                        | Import target-genre material files or directories |
 | `novel world-build <ws> [--force] [--merge-only] [--primary NAME] [--chapter-batch-size N] [--chunk-size N] [--max-workers N]` | Structure target-genre materials into a sectioned knowledge base |
 | `novel novel-outline <ws> [--direction TEXT] [--direction-file PATH]` | Generate core gameplay, long mainline, stage roadmap, and character arcs |
@@ -408,6 +411,7 @@ Retrieval queries, ranked hits, source fragments, injected context, and post-dra
 
 - `--txt <path>`: Reference novel file path. Used only by `init`.
 - `--batch-size N`: Chapters per reading window for story-arc detection. Default: 20. Used only by `init`.
+- `--rebuild-reference`: When the source changed or the saved state is from an older pipeline, delete chapter fact cards, story arcs, and reference structure before rebuilding from scratch. The source novel is preserved. The same option is available in the Web workbench's Reference Novel step.
 - `--direction TEXT`: Creative direction, for example "change to a modern urban setting". In `novel-outline`, it affects the full-book plan; in `story-design`, it tunes gameplay/stage/character assets; in `story-design-extend`, it guides the added material.
 - `--direction-file PATH`: Read creative direction from a file. Used by `novel-outline`, `story-design`, and `story-design-extend`.
 - `--use-reference`: With `story-design-extend`, use only reference story arcs added since the last full-book design. Without it, extend from existing new-book design assets only.

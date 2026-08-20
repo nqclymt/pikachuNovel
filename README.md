@@ -251,6 +251,9 @@ novel init 我的新小说 --txt /path/to/参考小说.txt --max-chapters 200
 # 后续继续拆到前 400 章，或移除 --max-chapters 以完成整本拆解
 novel reference-resume 我的新小说 --max-chapters 400
 
+# 源文件内容已变化或需要迁移旧版拆解状态时，清除旧拆解资产并从头生成
+novel reference-resume 我的新小说 --rebuild-reference
+
 # 只导入，稍后再决定拆整本还是前 N 章
 novel init 我的新小说 --txt /path/to/参考小说.txt --no-analyze
 
@@ -394,7 +397,7 @@ novel novel-outline 我的新小说 --direction "灵感输入"
 | `novel desktop [--port PORT] [--workspace-root PATH]`                | 启动独立桌面工作台窗口      |
 | `novel list`                                                          | 列出所有工作区            |
 | `novel init <ws> --txt <path> [--batch-size N] [--max-chapters N] [--no-analyze]` | 创建工作区，自动识别编码并按三阶段拆书；可只导入 |
-| `novel reference-resume <ws> [--batch-size N] [--max-chapters N]` | 继续或重试参考拆解 |
+| `novel reference-resume <ws> [--batch-size N] [--max-chapters N] [--rebuild-reference]` | 继续、重试或重新建立参考拆解 |
 | `novel world-import <ws> <paths...> [--force]`                        | 导入目标题材资料文件或目录      |
 | `novel world-build <ws> [--force] [--merge-only] [--primary NAME] [--chapter-batch-size N] [--chunk-size N] [--max-workers N]` | 将目标题材资料结构化为分栏知识库 |
 | `novel novel-outline <ws> [--direction TEXT] [--direction-file PATH]` | 生成核心玩法、长线主线、舞台路线图和角色成长线 |
@@ -411,6 +414,7 @@ novel novel-outline 我的新小说 --direction "灵感输入"
 
 - `--txt <path>`：参考小说文件路径（仅 init）
 - `--batch-size N`：每次读取章节数，用于识别故事情节单元，默认 20（仅 init）
+- `--rebuild-reference`：参考源文件已变化或状态来自旧版时，删除单章事实卡、故事片段和参考小说结构后从头拆解；保留参考小说源文件。Web 工作台可在“参考小说”步骤勾选同名选项
 - `--direction TEXT`：创作方向，如"改为现代都市背景"；`novel-outline` 用于生成全书方案，`story-design` 用于单独调整玩法/舞台/角色线，`story-design-extend` 用于补充后续设计
 - `--direction-file PATH`：从文件读取创作方向；适用于 `novel-outline`、`story-design` 和 `story-design-extend`
 - `--use-reference`：`story-design-extend` 读取上次全书设计后新增的参考故事片段；不传时只基于已有新书设计续写

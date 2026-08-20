@@ -152,6 +152,11 @@ button:disabled { cursor: not-allowed; }
 .reference-current-file small { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .reference-existing .reference-file-picker { padding: 10px 12px; border: 1px dashed #b8cfc4; background: transparent; }
 .reference-existing .reference-file-status { margin: -4px 0 0; color: #718078; font-size: 11px; }
+.decision-form .reference-rebuild-option { display: grid; grid-template-columns: 15px minmax(0, 1fr); gap: 8px; width: 100%; padding: 10px 12px; border-left: 3px solid #c58a34; color: #5d4931; background: #fff8ec; }
+.decision-form .reference-rebuild-option input { width: 15px; height: 15px; min-height: 0; margin-top: 2px; padding: 0; accent-color: #a46622; }
+.reference-rebuild-option span { display: grid; gap: 3px; }
+.reference-rebuild-option strong { font-size: 12px; }
+.reference-rebuild-option small { color: #78664e; font-size: 11px; font-weight: 400; line-height: 1.55; }
 .reference-progress { display: flex; align-items: baseline; flex-wrap: wrap; gap: 5px 12px; color: #536d61; font-size: 12px; line-height: 1.55; }
 .reference-progress strong { color: #284a3c; font-size: 13px; }
 .reference-coverage { margin: 8px 0 0; color: #536d61; font-size: 12px; line-height: 1.55; }
