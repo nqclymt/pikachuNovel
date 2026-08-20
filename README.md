@@ -53,14 +53,29 @@
 
 ## 安装
 
+### 推荐：安装 GitHub 最新桌面版
+
+目前独立窗口功能以 GitHub 仓库最新版为准。Windows 用户在 PowerShell 或命令提示符执行一次：
+
 ```bash
-pip install harnessNovel
+python -m pip install --upgrade "harnessNovel[desktop] @ https://github.com/nqclymt/pikachuNovel/archive/refs/heads/main.zip"
 ```
 
-更新：
+安装完成后启动：
 
 ```bash
-pip install --upgrade harnessNovel
+novel desktop
+```
+
+这条安装命令已包含主程序和桌面窗口依赖，不需要再执行普通版安装。使用 `python -m pip` 是为了让安装与运行尽量落在同一个 Python 环境。若系统找不到 `novel` 命令，可改用 `python -m novel_cli desktop`。
+
+### PyPI 普通版
+
+只使用浏览器工作台时可安装：
+
+```bash
+python -m pip install --upgrade harnessNovel
+novel web
 ```
 
 <h2 align="left"><img src="docs/heading-web-zh.svg" alt="Web 工作台" height="32"></h2>
@@ -78,14 +93,26 @@ novel web --workspace-root /path/to/my-novels
 
 ### 桌面窗口
 
-桌面版复用同一套工作台功能，并在独立窗口中运行。首次使用需安装桌面依赖：
+桌面版复用同一套工作台功能，并在独立窗口中运行。若已经从 PyPI 安装普通版，可补装桌面依赖：
 
 ```bash
-pip install --upgrade "harnessNovel[desktop]"
+python -m pip install --upgrade "harnessNovel[desktop]"
 novel desktop
 ```
 
-在源码仓库中也可运行 `python novel_cli.py desktop`，或直接双击根目录的 `start_desktop.pyw`。Windows 安装后还可运行无控制台窗口的 `harness-novel` 命令，并为该命令创建桌面快捷方式。
+Windows 下载源码后，直接双击根目录的 `start_desktop.cmd`：首次运行会自动安装当前源码及桌面依赖，安装成功后打开独立窗口；以后双击会直接启动。也可运行 `python novel_cli.py desktop`，或在依赖已安装后双击 `start_desktop.pyw`。Windows 安装后还可运行无控制台窗口的 `harness-novel` 命令，并为该命令创建桌面快捷方式。
+
+若安装后仍提示依赖缺失，请确认安装与启动使用同一套 Python：
+
+```bash
+where python
+where novel
+python -m pip show harnessNovel
+python -m pip show pywebview
+python -c "import webview; print(webview.__file__)"
+```
+
+Windows 10/11 通常已具备窗口所需的 WebView2 Runtime；若窗口创建失败或完全空白，请安装或修复 Microsoft Edge WebView2 Runtime。
 
 端口被占用时桌面版会自动选择其他本地端口；关闭窗口会同步停止本地服务。
 

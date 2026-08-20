@@ -53,14 +53,29 @@ Instead of asking AI to create from nothing, harnessNovel first lets it systemat
 
 ## Installation
 
+### Recommended: Latest Desktop Build from GitHub
+
+The standalone desktop window is currently distributed from the latest GitHub source. Run once in PowerShell or a terminal:
+
 ```bash
-pip install harnessNovel
+python -m pip install --upgrade "harnessNovel[desktop] @ https://github.com/nqclymt/pikachuNovel/archive/refs/heads/main.zip"
 ```
 
-Update:
+Then launch it with:
 
 ```bash
-pip install --upgrade harnessNovel
+novel desktop
+```
+
+This command installs both the application and its desktop dependencies. If `novel` is not on `PATH`, use `python -m novel_cli desktop`.
+
+### PyPI Web-only Install
+
+For the browser workbench only:
+
+```bash
+python -m pip install --upgrade harnessNovel
+novel web
 ```
 
 <h2 align="left"><img src="docs/heading-web-en.svg" alt="Local Web Workbench" height="32"></h2>
@@ -80,14 +95,26 @@ novel web --workspace-root /path/to/my-novels
 
 ### Desktop Window
 
-The desktop edition provides the same workspace in a standalone window. Install the optional desktop dependency before first use:
+The desktop edition provides the same workspace in a standalone window. If the regular PyPI package is already installed, add the optional desktop dependency:
 
 ```bash
-pip install --upgrade "harnessNovel[desktop]"
+python -m pip install --upgrade "harnessNovel[desktop]"
 novel desktop
 ```
 
-From a source checkout, run `python novel_cli.py desktop` or double-click `start_desktop.pyw` in the repository root. On Windows, the console-free `harness-novel` command can also be used as the target of a desktop shortcut.
+On Windows, a source checkout can be started by double-clicking `start_desktop.cmd`. On its first run it installs the local project and desktop dependencies, then opens the window; later runs start it directly. You may also run `python novel_cli.py desktop`, or double-click `start_desktop.pyw` after dependencies are installed.
+
+If the dependency warning remains after installation, verify that installation and startup use the same Python environment:
+
+```bash
+where python
+where novel
+python -m pip show harnessNovel
+python -m pip show pywebview
+python -c "import webview; print(webview.__file__)"
+```
+
+Windows 10/11 normally includes the required WebView2 Runtime. Install or repair Microsoft Edge WebView2 Runtime if the desktop window cannot be created or stays blank.
 
 If the preferred port is busy, the desktop launcher selects another local port automatically. Closing the window stops the local service.
 

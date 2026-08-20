@@ -52,12 +52,19 @@ def run_desktop(
     debug: bool = False,
 ) -> None:
     try:
-        import uvicorn
         import webview
-        from webui.app import create_app
     except ImportError as exc:
         raise RuntimeError(
-            "桌面窗口依赖未安装，请执行：pip install --upgrade harnessNovel[desktop]"
+            "桌面窗口依赖 pywebview 未安装。请使用当前 Python 执行："
+            "python -m pip install --upgrade \"harnessNovel[desktop]\""
+        ) from exc
+    try:
+        import uvicorn
+        from webui.app import create_app
+    except ImportError as exc:
+        missing = getattr(exc, "name", None) or str(exc)
+        raise RuntimeError(
+            f"程序依赖导入失败（{missing}）。请使用当前 Python 重新安装或更新 HarnessNovel。"
         ) from exc
 
     selected_port = _available_port(host, port)
