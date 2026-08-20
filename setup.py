@@ -7,7 +7,7 @@ setup(
     description="长篇网络小说写作 AI Agent",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
-    url="https://github.com/XTmingyue/harnessNovel",
+    url="https://github.com/nqclymt/pikachuNovel",
     license="GPL-3.0",
     packages=find_packages(),
     py_modules=["novel_cli"],

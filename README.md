@@ -386,21 +386,17 @@ novel novel-outline 我的新小说 --direction "灵感输入"
 
 飞鸟 one the way — 探索者
 
-<p align="left">
-  <img src="docs/qrcode.png" width="400" alt="公众号二维码">
-</p>
-
 ## Star History
 
 ## Star History
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=XTmingyue%2FharnessNovel&type=date&legend=top-left">
+<a href="https://www.star-history.com/?repos=nqclymt%2FpikachuNovel&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=XTmingyue/harnessNovel&type=date&theme=dark&legend=top-left&sealed_token=pXVarvqjLwVGWU1ssO117sGXYJwt6q91Yf-QqTmDpDqz8roh31aOfNBVcB7ygXPCW6crcRbHychzuSUkX9fWEAg879re3tYB2rHmIF8MVG1GKrEF5HLS4w" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=XTmingyue/harnessNovel&type=date&legend=top-left&sealed_token=pXVarvqjLwVGWU1ssO117sGXYJwt6q91Yf-QqTmDpDqz8roh31aOfNBVcB7ygXPCW6crcRbHychzuSUkX9fWEAg879re3tYB2rHmIF8MVG1GKrEF5HLS4w" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=XTmingyue/harnessNovel&type=date&legend=top-left&sealed_token=pXVarvqjLwVGWU1ssO117sGXYJwt6q91Yf-QqTmDpDqz8roh31aOfNBVcB7ygXPCW6crcRbHychzuSUkX9fWEAg879re3tYB2rHmIF8MVG1GKrEF5HLS4w" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=nqclymt/pikachuNovel&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=nqclymt/pikachuNovel&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=nqclymt/pikachuNovel&type=date&legend=top-left" />
  </picture>
 </a>
 
