@@ -189,9 +189,10 @@ def _replace_reference_with_latest_snapshot(ws, incoming_path, rebuild=False):
             f"新版小说仅识别到 {len(new_chapters)} 章，少于已拆解的 {reusable_limit} 章。"
         )
 
-    with open(ws.reference_sample, "w", encoding="utf-8") as handle:
-        handle.write(new_text)
-    source_digest = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+    source_bytes = new_text.encode("utf-8")
+    with open(ws.reference_sample, "wb") as handle:
+        handle.write(source_bytes)
+    source_digest = hashlib.sha256(source_bytes).hexdigest()
 
     cards_dir = os.path.join(ws.reference, "chapter_cards")
     for number in range(1, reusable_limit + 1):

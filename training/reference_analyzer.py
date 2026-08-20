@@ -60,6 +60,18 @@ def _file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _collapsed_windows_newline_digest(path: Path) -> str:
+    """还原旧版 Windows 文本写入造成的一次 CRLF 扩展，用于安全迁移错误摘要。"""
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return ""
+    collapsed = raw.replace(b"\r\n", b"\n")
+    if collapsed == raw:
+        return ""
+    return hashlib.sha256(collapsed).hexdigest()
+
+
 def _chapter_digest(content: str) -> str:
     """章节级稳定指纹；忽略下载站造成的空白差异，但保留正文字符差异。"""
     canonical = re.sub(r"\s+", "", normalize_text(content or ""))
@@ -205,11 +217,23 @@ class ReferenceAnalyzer:
             if not self.rebuild:
                 raise RuntimeError("检测到旧版故事片段。新三阶段拆解不会静默覆盖它们；请使用 --rebuild-reference 显式迁移。")
             self._clear_derived_assets()
-        if state and state.get("source_digest") and state.get("source_digest") != source_digest:
-            if not self.rebuild:
+        saved_source_digest = str(state.get("source_digest") or "") if state else ""
+        if saved_source_digest and saved_source_digest != source_digest:
+            if saved_source_digest == _collapsed_windows_newline_digest(self.txt_path):
+                state["source_digest"] = source_digest
+                state["source_digest_migrated_at"] = datetime.now().isoformat(timespec="seconds")
+                for card_path in self.cards_dir.glob("chapter_*.json"):
+                    card = _read_json(card_path, {})
+                    if isinstance(card, dict) and card.get("source_digest") == saved_source_digest:
+                        card["source_digest"] = source_digest
+                        _write_json(card_path, card)
+                _write_json(self.state_path, state)
+                print("  已自动修复 Windows 换行转换造成的参考小说摘要误差，继续复用现有拆解结果。")
+            elif not self.rebuild:
                 raise RuntimeError("参考小说源文件已变化。请使用 --rebuild-reference 重新建立单章卡和故事片段。")
-            self._clear_derived_assets()
-            state = {}
+            else:
+                self._clear_derived_assets()
+                state = {}
 
         if not state:
             state = {
