@@ -118,6 +118,8 @@ Windows 10/11 normally includes the required WebView2 Runtime. Install or repair
 
 If the preferred port is busy, the desktop launcher selects another local port automatically. Closing the window stops the local service.
 
+Open **Tasks & Logs** in the top-right corner to inspect live task output. When reference deconstruction or another task fails, use **Copy Log** to paste the complete error or **Download Log** to save the `.log` file. Logs remain available until the task record is deleted and include runtime details, provider errors, and Python tracebacks. Common API key, Authorization, and token formats are redacted before they are written.
+
 ### Interface Preview
 
 <table align="center">

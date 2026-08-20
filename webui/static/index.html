@@ -52,6 +52,8 @@
         <button type="button" data-task-view="prompt">模型 Prompt <span id="drawer-prompt-count">0</span></button>
       </div>
       <div class="drawer-history-actions">
+        <button id="copy-current-log" class="log-action" type="button" disabled>复制日志</button>
+        <button id="download-current-log" class="log-action" type="button" disabled>下载日志</button>
         <button id="clear-workspace-prompts" type="button">清空 Prompt</button>
         <button id="delete-current-task" class="danger" type="button">删除任务记录</button>
       </div>
@@ -84,6 +86,6 @@
       </form>
     </section>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/assets/wizard-v0.js?v=46"></script>
+  <script src="/assets/wizard-v0.js?v=47"></script>
   </body>
 </html>

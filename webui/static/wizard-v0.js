@@ -2584,6 +2584,7 @@ function setTaskView(view) {
   const promptView = wizardState.taskView === "prompt";
   $("#drawer-log").hidden = promptView;
   $("#drawer-prompts").hidden = !promptView;
+  $$(".log-action").forEach((button) => { button.hidden = promptView; });
   if (promptView) refreshTaskPrompts();
 }
 
@@ -2623,6 +2624,8 @@ async function refreshTasks() {
   const activeTask = tasks.find((task) => task.id === wizardState.activeTaskId);
   $("#drawer-prompt-count").textContent = String(Number(activeTask?.prompt_count || 0));
   $("#delete-current-task").disabled = !activeTask || ["queued", "running"].includes(activeTask.status);
+  $("#copy-current-log").disabled = !activeTask;
+  $("#download-current-log").disabled = !activeTask;
   $("#drawer-tasks").innerHTML = tasks.length ? tasks.map((task) => `<button class="drawer-task ${task.id === wizardState.activeTaskId ? "active" : ""}" data-task="${task.id}" type="button"><span><span class="drawer-task-title">${escapeHtml(task.label)}</span><span class="drawer-task-meta">${escapeHtml(task.created_at || "")}</span></span><span class="task-state ${task.status}">${taskLabel(task)}</span></button>`).join("") : '<p class="review-empty">当前工作区还没有任务记录。</p>';
   $$('[data-task]').forEach((button) => button.addEventListener("click", () => {
     wizardState.activeTaskId = button.dataset.task;
@@ -2835,6 +2838,23 @@ async function boot() {
       if (!wizardState.currentPromptText) return;
       await navigator.clipboard.writeText(wizardState.currentPromptText);
       showToast("Prompt 已复制。");
+    });
+    $("#copy-current-log").addEventListener("click", async () => {
+      if (!wizardState.activeTaskId) return;
+      try {
+        const data = await api(`/api/tasks/${wizardState.activeTaskId}/logs?offset=0`);
+        await copyPreviewText(data.content || "该任务尚无日志输出。");
+        showToast("完整任务日志已复制。");
+      } catch (error) { showToast(error.message || "无法复制任务日志。", true); }
+    });
+    $("#download-current-log").addEventListener("click", () => {
+      if (!wizardState.activeTaskId) return;
+      const link = document.createElement("a");
+      link.href = `/api/tasks/${encodeURIComponent(wizardState.activeTaskId)}/logs/download`;
+      link.download = "";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
     });
     $("#clear-workspace-prompts").addEventListener("click", async () => {
       if (!wizardState.workspace || !confirm("清空当前工作区所有已结束任务的 Prompt 记录？任务日志和生成产物不会删除。")) return;

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import traceback
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -794,6 +795,16 @@ class TaskManager:
             "next_offset": len(content),
         }
 
+    def log_file(self, task_id: str) -> tuple[TaskRecord, Path]:
+        """返回受任务目录约束的完整日志文件，供浏览器下载。"""
+        task = self.get(task_id)
+        if not task:
+            raise KeyError(task_id)
+        path = self.task_dir / f"{task.id}.log"
+        if not path.exists():
+            path.write_text("该任务尚无日志输出。\n", encoding="utf-8")
+        return task, path
+
     def prompts(self, task_id: str) -> dict[str, Any]:
         """返回任务执行期间实际发送给模型的 Prompt。"""
         task = self.get(task_id)
@@ -891,6 +902,11 @@ class TaskManager:
             task.message = "正在执行"
             self._persist_record(task)
         self._append_log(task, f"开始：{task.label}\n")
+        self._append_log(
+            task,
+            f"任务 ID：{task.id}\n工作区：{task.workspace}\n"
+            f"Python：{sys.executable}\n启动时间：{task.started_at}\n\n",
+        )
         reported_warning = False
 
         env = os.environ.copy()
@@ -919,7 +935,7 @@ class TaskManager:
                     or "[LLMProvider] 未配置 api_key" in line
                 ):
                     reported_warning = True
-                self._append_log(task, line)
+                self._append_log(task, self._redact_log(line))
             process.stdout.close()
             exit_code = process.wait()
             with self._lock:
@@ -933,8 +949,16 @@ class TaskManager:
                 else:
                     task.status = "succeeded"
                     task.message = "执行完成"
+            self._append_log(
+                task,
+                f"\n结束状态：{task.status}\n退出码：{exit_code}\n",
+            )
         except Exception as exc:  # noqa: BLE001 - 日志必须记录后台执行异常
-            self._append_log(task, f"\n工作台启动任务失败：{exc}\n")
+            self._append_log(
+                task,
+                f"\n工作台启动任务失败：{exc}\n\n"
+                f"{traceback.format_exc()}",
+            )
             with self._lock:
                 task.status = "failed"
                 task.message = "工作台无法启动该任务"
@@ -950,6 +974,19 @@ class TaskManager:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(content)
+
+    @staticmethod
+    def _redact_log(content: str) -> str:
+        """隐藏常见凭据格式；不改变普通模型错误和 traceback。"""
+        text = str(content or "")
+        text = re.sub(
+            r"(?i)\b(api[_-]?key|authorization|access[_-]?token)\b"
+            r"(\s*[:=]\s*)(['\"]?)(?:Bearer\s+)?[^\s,'\"}]+",
+            r"\1\2\3***",
+            text,
+        )
+        text = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]{8,}", "Bearer ***", text)
+        return text
 
     def _build_command(self, task_type: str, workspace: str, args: dict[str, Any]) -> list[str]:
         command = [sys.executable, "-m", "novel_cli"]

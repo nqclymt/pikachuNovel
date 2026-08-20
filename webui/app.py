@@ -752,6 +752,18 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
         except KeyError as exc:
             raise _http_error(ValueError("任务不存在。"), 404) from exc
 
+    @app.get("/api/tasks/{task_id}/logs/download")
+    def download_task_log(task_id: str) -> FileResponse:
+        try:
+            task, path = runtime.tasks.log_file(task_id)
+            return FileResponse(
+                path,
+                media_type="text/plain; charset=utf-8",
+                filename=f"harnessNovel-{task.type}-{task.id}.log",
+            )
+        except KeyError as exc:
+            raise _http_error(ValueError("任务不存在。"), 404) from exc
+
     @app.get("/api/tasks/{task_id}/prompts")
     def task_prompts(task_id: str) -> dict[str, Any]:
         try:
