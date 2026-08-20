@@ -76,6 +76,19 @@ novel web
 novel web --workspace-root /path/to/my-novels
 ```
 
+### 桌面窗口
+
+桌面版复用同一套工作台功能，并在独立窗口中运行。首次使用需安装桌面依赖：
+
+```bash
+pip install --upgrade "harnessNovel[desktop]"
+novel desktop
+```
+
+在源码仓库中也可运行 `python novel_cli.py desktop`，或直接双击根目录的 `start_desktop.pyw`。Windows 安装后还可运行无控制台窗口的 `harness-novel` 命令，并为该命令创建桌面快捷方式。
+
+端口被占用时桌面版会自动选择其他本地端口；关闭窗口会同步停止本地服务。
+
 ### 界面预览
 
 <table align="center">
@@ -328,6 +341,7 @@ novel novel-outline 我的新小说 --direction "灵感输入"
 | --------------------------------------------------------------------- | ------------------ |
 | `novel config`                                                        | 初始化全局配置文件          |
 | `novel web [--host HOST] [--port PORT] [--workspace-root PATH]`      | 启动本地可视化工作台        |
+| `novel desktop [--port PORT] [--workspace-root PATH]`                | 启动独立桌面工作台窗口      |
 | `novel list`                                                          | 列出所有工作区            |
 | `novel init <ws> --txt <path> [--batch-size N] [--max-chapters N] [--no-analyze]` | 创建工作区，自动识别编码并按三阶段拆书；可只导入 |
 | `novel reference-resume <ws> [--batch-size N] [--max-chapters N]` | 继续或重试参考拆解 |

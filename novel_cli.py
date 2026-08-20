@@ -609,6 +609,20 @@ def cmd_web(args):
 
 # ── 主入口 ──────────────────────────────────────────────
 
+def cmd_desktop(args):
+    """启动独立桌面窗口。"""
+    try:
+        from webui.desktop import run_desktop
+        run_desktop(
+            workspace_root=args.workspace_root,
+            host=args.host,
+            port=args.port,
+            debug=args.debug,
+        )
+    except RuntimeError as exc:
+        print(f"错误：{exc}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="novel",
@@ -755,6 +769,13 @@ def main():
     p.add_argument("--port", type=int, default=8765, help="监听端口（默认 8765）")
     p.add_argument("--workspace-root", help="工作区根目录；不传时优先使用 ~/Documents/my-novels")
 
+    # desktop
+    p = sub.add_parser("desktop", help="启动独立桌面工作台窗口")
+    p.add_argument("--host", default="127.0.0.1", help=argparse.SUPPRESS)
+    p.add_argument("--port", type=int, default=8765, help="本地服务端口（被占用时自动切换）")
+    p.add_argument("--workspace-root", help="工作区根目录；不传时使用上次保存的位置")
+    p.add_argument("--debug", action="store_true", help="启用桌面窗口调试模式")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -780,6 +801,7 @@ def main():
         "chapter-outlines": cmd_chapter_outlines,
         "write": cmd_write,
         "web": cmd_web,
+        "desktop": cmd_desktop,
         "config": cmd_config
     }
     dispatch[args.command](args)

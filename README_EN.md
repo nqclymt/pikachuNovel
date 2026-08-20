@@ -78,6 +78,19 @@ On first launch it prefers `~/Documents/my-novels` as the workspace root; you ca
 novel web --workspace-root /path/to/my-novels
 ```
 
+### Desktop Window
+
+The desktop edition provides the same workspace in a standalone window. Install the optional desktop dependency before first use:
+
+```bash
+pip install --upgrade "harnessNovel[desktop]"
+novel desktop
+```
+
+From a source checkout, run `python novel_cli.py desktop` or double-click `start_desktop.pyw` in the repository root. On Windows, the console-free `harness-novel` command can also be used as the target of a desktop shortcut.
+
+If the preferred port is busy, the desktop launcher selects another local port automatically. Closing the window stops the local service.
+
 ### Interface Preview
 
 <table align="center">
@@ -331,6 +344,7 @@ novel novel-outline my-new-novel --direction "inspiration input"
 | --------------------------------------------------------------------- | ------------------------------------------------ |
 | `novel config`                                                        | Initialize the global config file                |
 | `novel web [--host HOST] [--port PORT] [--workspace-root PATH]`      | Start the local visual workbench                 |
+| `novel desktop [--port PORT] [--workspace-root PATH]`                | Start the standalone desktop workbench           |
 | `novel list`                                                          | List all workspaces                              |
 | `novel init <ws> --txt <path> [--batch-size N] [--max-chapters N] [--no-analyze]` | Create a workspace, normalize the source, and run the three-stage deconstruction; `--no-analyze` imports only |
 | `novel reference-resume <ws> [--batch-size N] [--max-chapters N]` | Resume or retry reference deconstruction |

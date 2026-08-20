@@ -19,6 +19,9 @@ setup(
         "console_scripts": [
             "novel=novel_cli:main",
         ],
+        "gui_scripts": [
+            "harness-novel=webui.desktop:main",
+        ],
     },
     install_requires=[
         "openai",
@@ -27,5 +30,8 @@ setup(
         "uvicorn>=0.27",
         "python-multipart>=0.0.9",
     ],
+    extras_require={
+        "desktop": ["pywebview>=5.0"],
+    },
     python_requires=">=3.9",
 )

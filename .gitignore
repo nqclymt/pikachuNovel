@@ -9,3 +9,4 @@ build/
 tests/
 .pytest_cache/
 _temp/
+.idea/
