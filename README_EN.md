@@ -159,6 +159,8 @@ Supports Claude, GPT-4o, DeepSeek, Qwen, and other mainstream models.
 - **End-to-end automation**: From novel analysis and gameplay design to full text generation, complete a long-form web novel with chained commands.
 - **Reference-based imitation**: Generate new content based on the pacing, structure, and tension curve of the reference novel instead of creating from nothing.
 - **Target-world knowledge base (optional enhancement)**: Import target-genre materials/settings/sample web novels, structure them into a knowledge base, and use it to validate the core gameplay, long mainline, stage roadmap, and character arcs. Without a knowledge base, the workflow automatically falls back to reference novel + user direction.
+- **Chapter-level hybrid retrieval**: Story arcs, chapter outlines, and drafts retrieve a small set of relevant facts using fixed canon rules, BM25-style Chinese fragment matching, alias expansion, and low-confidence section fallback.
+- **Natural prose first**: Retrieved knowledge constrains facts but is never required to appear in prose. After humanization, an audit applies only minimal local fixes for explicit canon conflicts.
 - **Narrative abstraction against hard reskins**: Reference arcs are first abstracted into narrative patterns, then regenerated against the current stage context to reduce direct rename-and-copy behavior. Story-arc auditing is currently disabled while the audit criteria are being refined.
 - **Story arcs**: During reference deconstruction, story units are extracted by natural plot boundaries and can continue across reading windows.
 - **Gameplay/stage/character lines**: The new novel first gets core gameplay, a long-running mainline, a stage roadmap, and character arcs. Each stage naturally becomes the scope for later story-arc generation.
@@ -332,6 +334,19 @@ novel world-build my-new-novel --primary main-source.txt
 # Then generate the new outline as usual; the knowledge base is loaded automatically.
 novel novel-outline my-new-novel --direction "inspiration input"
 ```
+
+After the knowledge base is built, it also participates directly in `story-arcs`, `chapter-outlines`, and `write`. Each task receives a small fact budget rather than the entire database: core rules are always available, relevant fragments are ranked with Chinese text matching and aliases, and low-confidence queries fall back to relevant section fragments. Retrieved facts are constraints only, so unrelated knowledge must not be explained in the prose.
+
+Aliases that cannot be inferred reliably may be added to `file_system/world_knowledge/aliases.json`:
+
+```json
+{
+  "Lin Yuan": ["A-Yuan", "Senior Lin"],
+  "Xuantian Sect": ["Xuan Sect", "Northern Sect"]
+}
+```
+
+Retrieval queries, ranked hits, source fragments, injected context, and post-draft consistency audits are saved under `file_system/knowledge_retrieval/vol_xx/` for inspection. These are workspace artifacts, not program test data.
 
 ## Notes
 

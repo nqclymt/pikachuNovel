@@ -5,6 +5,9 @@
 【当前故事情节单元】（本批章纲所属的故事情节）
 {story_arc}
 
+【目标世界事实约束】（只校验涉及的事实，不要求增加设定说明）
+{world_knowledge_constraints}
+
 【当前章纲】（需要调整的内容）
 {current_outlines}
 

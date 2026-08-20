@@ -11,6 +11,9 @@
 【当前舞台】
 {current_stage}
 
+【目标世界事实约束】（只校验涉及的事实，不要求增加设定说明）
+{world_knowledge_constraints}
+
 【参考小说对应卷的故事片段汇总】
 {reference_story_arcs}
 

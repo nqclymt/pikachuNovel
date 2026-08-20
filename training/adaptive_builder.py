@@ -25,6 +25,10 @@ from core.world_knowledge import (
     load_world_knowledge_context,
     world_knowledge_status,
 )
+from core.knowledge_retrieval import (
+    record_consistency_audit,
+    retrieve_world_knowledge,
+)
 from training.reference_finder import (
     list_reference_volumes,
     list_reference_story_arcs,
@@ -3810,9 +3814,17 @@ def _generate_batch_summary_with_audit(ws, llm, volume, batch_idx, start_ch, end
 def _generate_story_arc(ws, llm, volume, arc_idx, start_ch, end_ch,
                         generation_context, target_char_count, cancel_event=None):
     """只基于长线、前后舞台和对应参考卷故事片段生成当前单元。"""
+    retrieval = retrieve_world_knowledge(
+        ws,
+        "\n".join((generation_context.get("long_mainline", ""), generation_context.get("current_stage", ""))),
+        "故事情节生成",
+        volume=volume,
+        trace_key=f"arc_{arc_idx:03d}_ch{start_ch:03d}_{end_ch:03d}",
+    )
     prompt = PromptLoader.load(
         "novel_story_arc",
         **generation_context,
+        world_knowledge_constraints=retrieval["context"] or "（未启用目标世界知识库；以当前舞台与用户设计为准。）",
         arc_index=arc_idx,
         start_chapter=start_ch,
         end_chapter=end_ch,
@@ -4018,9 +4030,17 @@ def refine_story_arcs(ws, volume, instruction, cancel_event=None):
     generation_context = _simple_story_arc_context(ws, volume)
 
     current_text = "\n\n===\n\n".join(arc["content"] for arc in arcs)
+    retrieval = retrieve_world_knowledge(
+        ws,
+        f"{generation_context.get('current_stage', '')}\n{current_text}\n{instruction}",
+        "故事情节调整",
+        volume=volume,
+        trace_key="arcs_refine",
+    )
     prompt = PromptLoader.load(
         "story_arcs_refine",
         **generation_context,
+        world_knowledge_constraints=retrieval["context"] or "（未启用目标世界知识库；以当前舞台和用户指令为准。）",
         current_arcs=current_text,
         instruction=instruction,
     )
@@ -4198,9 +4218,17 @@ def refine_story_arcs_serial(ws, volume, instruction, progress_callback=None,
                 "refining", len(written), len(targets),
                 f"路由结果：从情节单元{start_arc}开始；正在{action_label}情节单元{target['idx']}",
             )
+        retrieval = retrieve_world_knowledge(
+            ws,
+            f"{generation_context.get('current_stage', '')}\n{previous}\n{target['content']}\n{instruction}",
+            "故事情节调整",
+            volume=volume,
+            trace_key=f"arc_refine_{target['idx']:03d}",
+        )
         prompt = PromptLoader.load(
             "story_arc_serial_refine",
             **generation_context,
+            world_knowledge_constraints=retrieval["context"] or "（未启用目标世界知识库；以当前舞台和用户指令为准。）",
             instruction=instruction,
             previous_story_arc=previous,
             current_story_arc=(
@@ -4383,6 +4411,13 @@ def gen_serial_chapter_outlines(ws, volume=1, force=False):
             ).strip() or "（这是第一章，无上一章章纲）"
 
             print(f"  生成第{ch_num}章章纲...")
+            retrieval = retrieve_world_knowledge(
+                ws,
+                f"{arc_content}\n{previous_text}\n第{ch_num}章",
+                "逐章章纲生成",
+                volume=volume,
+                trace_key=f"outline_{ch_num:03d}",
+            )
             prompt = PromptLoader.load(
                 "serial_chapter_outline",
                 previous_system_panel=json.dumps(
@@ -4391,6 +4426,7 @@ def gen_serial_chapter_outlines(ws, volume=1, force=False):
                 story_arc=arc_content,
                 previous_chapter_outline=previous_text,
                 chapter_num=ch_num,
+                world_knowledge_constraints=retrieval["context"] or "（未启用目标世界知识库；以故事情节单元和上一章状态为准。）",
             )
             result = normalize_text(llm.generate(prompt))
             _generate_chapter_system_panel(llm, ws, volume, ch_num, result)
@@ -4525,6 +4561,13 @@ def gen_chapter_outlines_for_arc(ws, volume, arc_idx, progress_callback=None,
         ).strip() or "（这是第一章，无上一章章纲）"
 
         print(f"  生成第{ch_num}章章纲...")
+        retrieval = retrieve_world_knowledge(
+            ws,
+            f"{arc_content}\n{previous_text}\n第{ch_num}章",
+            "逐章章纲生成",
+            volume=volume,
+            trace_key=f"outline_{ch_num:03d}",
+        )
         prompt = PromptLoader.load(
             "serial_chapter_outline",
             previous_system_panel=json.dumps(
@@ -4533,6 +4576,7 @@ def gen_chapter_outlines_for_arc(ws, volume, arc_idx, progress_callback=None,
             story_arc=arc_content,
             previous_chapter_outline=previous_text,
             chapter_num=ch_num,
+            world_knowledge_constraints=retrieval["context"] or "（未启用目标世界知识库；以故事情节单元和上一章状态为准。）",
         )
         if progress_callback:
             progress_callback(
@@ -4743,6 +4787,13 @@ def refine_chapter_outlines_serial(ws, volume, arc_idx, instruction, progress_ca
                 "refining", len(written), len(targets),
                 f"路由结果：从第{routed_chapter}章开始；正在处理第{ch_num}章",
             )
+        retrieval = retrieve_world_knowledge(
+            ws,
+            f"{target_arc['content']}\n{previous}\n{current}\n{instruction}",
+            "逐章章纲调整",
+            volume=volume,
+            trace_key=f"outline_refine_{ch_num:03d}",
+        )
         prompt = PromptLoader.load(
             "chapter_outline_serial_refine",
             story_arc=target_arc["content"],
@@ -4757,6 +4808,7 @@ def refine_chapter_outlines_serial(ws, volume, arc_idx, instruction, progress_ca
                 else "（本轮为完全重新生成，不提供当前章旧章纲，也不得臆测或复原旧文。）"
             ),
             chapter_num=ch_num,
+            world_knowledge_constraints=retrieval["context"] or "（未启用目标世界知识库；以故事情节单元和用户指令为准。）",
         )
         while True:
             try:
@@ -4846,9 +4898,17 @@ def refine_chapter_outlines(ws, volume, arc_idx, instruction):
         return {}
 
     current_text = "\n\n===\n\n".join(outlines)
+    retrieval = retrieve_world_knowledge(
+        ws,
+        f"{target_arc['content']}\n{current_text}\n{instruction}",
+        "逐章章纲调整",
+        volume=volume,
+        trace_key=f"outlines_refine_arc_{arc_idx:03d}",
+    )
     prompt = PromptLoader.load(
         "chapter_outlines_refine",
         story_arc=target_arc["content"],
+        world_knowledge_constraints=retrieval["context"] or "（未启用目标世界知识库；以故事情节单元和用户指令为准。）",
         current_outlines=current_text,
         instruction=instruction,
     )
@@ -5088,6 +5148,67 @@ def _humanize_chapter_text(
     return result
 
 
+def _audit_generated_chapter_knowledge(llm, chapter_num, chapter_text,
+                                       chapter_outline, retrieval, cancel_event=None):
+    """只审查本章命中的事实；未命中时不额外调用模型。"""
+    hits = retrieval.get("hits") if isinstance(retrieval, dict) else []
+    if not hits:
+        return {"status": "skipped", "reason": "本章未命中明确事实条目", "rewrite": False}
+    facts = retrieval.get("context") or "\n\n".join(
+        f"【{item.get('section')} / {item.get('heading')}】\n{item.get('excerpt', '')}"
+        for item in hits
+    )
+    prompt = PromptLoader.load(
+        "knowledge_consistency_audit",
+        chapter_num=chapter_num,
+        chapter_outline=chapter_outline,
+        chapter_text=chapter_text,
+        retrieved_facts=facts,
+    )
+    try:
+        raw = normalize_text(_generate_with_cancel(llm, prompt, cancel_event, temperature=0.1))
+        audit = parse_json_response(raw)
+    except LLMCallCancelled:
+        raise
+    except Exception as exc:
+        return {"status": "error", "reason": str(exc), "rewrite": False}
+    if not isinstance(audit, dict):
+        return {"status": "invalid", "rewrite": False}
+    corrections = []
+    for item in audit.get("corrections") or []:
+        if not isinstance(item, dict):
+            continue
+        original = str(item.get("original") or "").strip()
+        replacement = str(item.get("replacement") or "").strip()
+        if original and replacement and original != replacement:
+            corrections.append({
+                "original": original,
+                "replacement": replacement,
+                "fact": str(item.get("fact") or "").strip(),
+            })
+    audit["corrections"] = corrections
+    audit["rewrite"] = audit.get("status") == "conflict" and bool(corrections)
+    return audit
+
+
+def _repair_chapter_knowledge(chapter_text, audit):
+    """按审计给出的原文片段做单次精确替换，禁止整章二次改写。"""
+    result = chapter_text
+    applied = []
+    for correction in audit.get("corrections") or []:
+        original = correction["original"]
+        if original not in result:
+            continue
+        candidate = result.replace(original, correction["replacement"], 1)
+        if sum(item["count"] for item in _chapter_style_violations(candidate)) > sum(
+            item["count"] for item in _chapter_style_violations(result)
+        ):
+            continue
+        result = candidate
+        applied.append(correction)
+    return result, applied
+
+
 def gen_serial_chapters(
     ws,
     volume=1,
@@ -5316,8 +5437,17 @@ def gen_serial_chapters(
                 f"{json.dumps(current_panel, ensure_ascii=False, indent=2)}\n\n"
             )
 
+        knowledge_result = retrieve_world_knowledge(
+            ws,
+            f"{story_arc_summary}\n{chapter_outline}\n第{ch_num}章",
+            "正文生成",
+            volume=volume,
+            trace_key=f"chapter_{ch_num:03d}",
+        )
         context = (
             f"=== 写作规范 ===\n{writing_rules}\n\n"
+            f"=== 目标世界事实约束（只用于校验，不要求逐条写出）===\n"
+            f"{knowledge_result['context'] or '（未启用目标世界知识库；以章纲和前文为准。）'}\n\n"
             f"=== 当前故事情节单元 ===\n{story_arc_summary or '（未找到故事情节单元，请严格以章纲为准）'}\n\n"
             f"=== 前序正文（仅用于承接，不得覆盖本章章纲）===\n{history_section}\n\n"
             + panel_section
@@ -5358,6 +5488,34 @@ def gen_serial_chapters(
             result = humanize_with_controls(ch_num, result, idx, len(tasks))
             if result is None:
                 break
+        while True:
+            try:
+                audit = _audit_generated_chapter_knowledge(
+                    llm, ch_num, result, chapter_outline, knowledge_result,
+                    cancel_event=cancel_event,
+                )
+                break
+            except LLMCallCancelled:
+                if stop_event is not None and stop_event.is_set():
+                    result = None
+                    break
+                if progress_callback:
+                    progress_callback(
+                        "paused", idx, len(tasks),
+                        f"第{ch_num}章设定一致性审查已暂停；继续后重新审查",
+                    )
+                if pause_event is not None:
+                    pause_event.wait()
+                if cancel_event is not None:
+                    cancel_event.clear()
+        if result is None:
+            break
+        if audit.get("rewrite"):
+            print(f"  -> 第{ch_num}章命中知识库事实冲突，正在局部修正。")
+            result, applied = _repair_chapter_knowledge(result, audit)
+            audit["applied_corrections"] = applied
+            audit["rewrite"] = bool(applied)
+        record_consistency_audit(knowledge_result.get("snapshot_path"), audit)
         result = _format_chapter_paragraphs(result)
         if regenerate_existing and os.path.exists(out_file):
             import shutil
