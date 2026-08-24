@@ -17,6 +17,16 @@ class _Store:
 
 
 class TaskRunnerStopTests(unittest.TestCase):
+    def test_frozen_app_uses_cli_dispatcher(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = TaskManager(_Store(root), root / "tasks", uploads=None)
+
+            with patch("webui.task_runner.sys.frozen", True, create=True):
+                command = manager._build_command("workspace_init", "demo", {})
+
+            self.assertEqual(command, [sys.executable, "--cli", "init", "demo"])
+
     def test_running_cli_task_can_be_stopped(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

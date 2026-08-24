@@ -55,6 +55,10 @@
 
 详细的 Windows 安装、配置和创作流程请参阅：[中文使用教程](docs/使用教程.md)。
 
+### Windows 独立版（无需 Python）
+
+从 [GitHub Releases](https://github.com/nqclymt/pikachuNovel/releases/latest) 下载 `HarnessNovel.exe`，双击即可启动。首次下载时 Windows 可能显示 SmartScreen 提示，请核对发布者仓库和同一发布页中的 `HarnessNovel.exe.sha256` 后再选择运行。作品默认保存在“文档”目录下的 `my-novels`，升级 EXE 不会删除作品和本地 API 配置。
+
 ### 推荐：安装 GitHub 最新桌面版
 
 目前独立窗口功能以 GitHub 仓库最新版为准。Windows 用户在 PowerShell 或命令提示符执行一次：

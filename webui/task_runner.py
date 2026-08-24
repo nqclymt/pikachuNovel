@@ -1045,7 +1045,11 @@ class TaskManager:
         return text
 
     def _build_command(self, task_type: str, workspace: str, args: dict[str, Any]) -> list[str]:
-        command = [sys.executable, "-m", "novel_cli"]
+        command = (
+            [sys.executable, "--cli"]
+            if getattr(sys, "frozen", False)
+            else [sys.executable, "-m", "novel_cli"]
+        )
         force = bool(args.get("force"))
 
         if task_type == "workspace_init":
