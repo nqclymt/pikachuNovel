@@ -433,22 +433,6 @@ Retrieval queries, ranked hits, source fragments, injected context, and post-dra
 - `--force`: Force regeneration and overwrite existing content.
 
 
-## About the Author
-
-飞鸟 one the way — Explorer
-
-## Star History
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=nqclymt%2FpikachuNovel&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=nqclymt/pikachuNovel&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=nqclymt/pikachuNovel&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=nqclymt/pikachuNovel&type=date&legend=top-left" />
- </picture>
-</a>
-
 ## License
 
 [GPL-3.0](LICENSE)

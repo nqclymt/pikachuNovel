@@ -436,24 +436,6 @@ novel novel-outline 我的新小说 --direction "灵感输入"
 - `--force`：强制重新生成，覆盖已有内容
 
 
-## 关于作者
-
-飞鸟 one the way — 探索者
-
-## Star History
-
-## Star History
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=nqclymt%2FpikachuNovel&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=nqclymt/pikachuNovel&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=nqclymt/pikachuNovel&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=nqclymt/pikachuNovel&type=date&legend=top-left" />
- </picture>
-</a>
-
 ## License
 
 [GPL-3.0](LICENSE)
