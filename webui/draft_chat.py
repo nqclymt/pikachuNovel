@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from core.llm_provider import LLMCallCancelled
+from core.llm_provider import LLMCallCancelled, capture_llm_status
 from core.prompt_trace import capture_prompts
 from core.workspace import init_workspace
 
@@ -139,8 +139,15 @@ class DraftChatManager:
                         prompt_model=event.get("model", ""),
                         prompt_created_at=event.get("created_at", ""),
                     )
+            def trace_status(message: str) -> None:
+                with self._lock:
+                    active = self._jobs.get(key)
+                    if active and active["id"] == job["id"]:
+                        active["message"] = message.removeprefix("[LLMProvider] ")
             trace_context = capture_prompts(trace_prompt)
+            status_context = capture_llm_status(trace_status)
             trace_context.__enter__()
+            status_context.__enter__()
             try:
                 from training.adaptive_builder import (
                     _finalized_chapter_boundary, _list_novel_story_arcs, chapter_draft_resume_status,
@@ -210,6 +217,7 @@ class DraftChatManager:
                     if active and active["id"] == job["id"]:
                         active.update(status="failed", phase="failed", message="生成失败", error=str(exc))
             finally:
+                status_context.__exit__(None, None, None)
                 trace_context.__exit__(None, None, None)
 
         threading.Thread(target=worker, name=f"draft-chat-{volume}-{arc_idx}", daemon=True).start()

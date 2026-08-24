@@ -25,6 +25,7 @@ from webui.design_chat import DesignChatManager
 from webui.arc_chat import ArcsChatManager
 from webui.chapter_chat import ChapterOutlineChatManager
 from webui.draft_chat import DraftChatManager
+from webui.cc_switch import load_cc_switch_providers, validate_cc_switch_provider
 from core.workspace import init_workspace
 
 
@@ -115,6 +116,19 @@ def _config_for_client() -> dict[str, Any]:
     return {"config_path": str(_effective_config_path()), "groups": groups}
 
 
+def _cc_switch_config_for_client() -> dict[str, Any]:
+    try:
+        path, providers = load_cc_switch_providers()
+    except ValueError as exc:
+        return {"detected": True, "database_path": "", "providers": [], "error": str(exc)}
+    return {
+        "detected": path is not None,
+        "database_path": str(path or ""),
+        "providers": [provider.public() for provider in providers],
+        "error": "",
+    }
+
+
 def _update_env(updates: dict[str, str]) -> None:
     config_path = _effective_config_path()
     lines, _ = _read_env()
@@ -154,7 +168,7 @@ class WebRuntime:
         self._persist_root()
 
     def set_workspace_root(self, root: str) -> None:
-        if any(task["status"] in {"queued", "running"} for task in self.tasks.list()):
+        if any(task["status"] in {"queued", "running", "stopping"} for task in self.tasks.list()):
             raise ValueError("有任务正在执行，结束后才能切换工作区根目录。")
         self.store.set_root(root)
         os.environ["HARNESS_NOVEL_HOME"] = str(self.store.root)
@@ -277,6 +291,54 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
             from core.config import ConfigLoader
             ConfigLoader.activate(updates)
         return _config_for_client()
+
+    @app.get("/api/config/cc-switch")
+    def get_cc_switch_config() -> dict[str, Any]:
+        return _cc_switch_config_for_client()
+
+    @app.post("/api/config/cc-switch/import")
+    def import_cc_switch_config(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        assignments = payload.get("assignments")
+        if not isinstance(assignments, dict):
+            raise _http_error(ValueError("CC Switch 导入参数格式无效。"))
+        selected = {
+            group_id: str(assignments.get(group_id) or "").strip()
+            for group_id in CONFIG_GROUPS
+            if str(assignments.get(group_id) or "").strip()
+        }
+        if not selected:
+            raise _http_error(ValueError("请至少为一个创作阶段选择 CC Switch 供应商。"))
+        try:
+            path, providers = load_cc_switch_providers()
+            if path is None:
+                raise ValueError("未检测到 CC Switch 数据库。")
+            by_id = {provider.id: provider for provider in providers}
+            validated = {}
+            updates = {}
+            imported = []
+            for group_id, provider_id in selected.items():
+                provider = by_id.get(provider_id)
+                if provider is None:
+                    raise ValueError(f"CC Switch 供应商不存在或已经被删除：{provider_id}")
+                if provider_id not in validated:
+                    validated[provider_id] = validate_cc_switch_provider(provider)
+                resolved = validated[provider_id]
+                prefix = CONFIG_GROUPS[group_id][1]
+                updates[f"{prefix}_MODEL"] = resolved.model
+                updates[f"{prefix}_BASE_URL"] = resolved.base_url
+                updates[f"{prefix}_API_KEY"] = resolved.api_key
+                imported.append({
+                    "group": group_id,
+                    "provider": resolved.name,
+                    "model": resolved.model,
+                    "base_url": resolved.base_url,
+                })
+            _update_env(updates)
+            from core.config import ConfigLoader
+            ConfigLoader.activate(updates)
+            return {"config": _config_for_client(), "imported": imported}
+        except ValueError as exc:
+            raise _http_error(exc) from exc
 
     @app.get("/api/workspaces")
     def list_workspaces() -> dict[str, Any]:
@@ -770,6 +832,15 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
             return runtime.tasks.prompts(task_id)
         except KeyError as exc:
             raise _http_error(ValueError("任务不存在。"), 404) from exc
+
+    @app.post("/api/tasks/{task_id}/stop")
+    def stop_task(task_id: str) -> dict[str, Any]:
+        try:
+            return runtime.tasks.stop(task_id)
+        except KeyError as exc:
+            raise _http_error(ValueError("任务不存在。"), 404) from exc
+        except ValueError as exc:
+            raise _http_error(exc) from exc
 
     @app.delete("/api/tasks/{task_id}")
     def delete_task(task_id: str) -> dict[str, Any]:

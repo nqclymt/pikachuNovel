@@ -17,6 +17,7 @@ from typing import Any
 
 from core.workspace import init_workspace
 from core.prompt_trace import capture_prompts
+from core.llm_provider import capture_llm_status
 
 
 # 路由 3 关键词：匹配任一即走续写追加路径（仅 scope=stage 生效）
@@ -278,44 +279,57 @@ class DesignChatManager:
                 "stopped": True,
             }
 
-        def run_stage_operation(operation):
+        def stopped_concept_result() -> dict[str, Any]:
+            base = _design_dir(ws)
+            return {
+                "worldview": _read_text(os.path.join(base, "worldview.md")),
+                "rough_outline": _read_text(os.path.join(base, "rough_outline.md")),
+                "stage_outline": _read_text(os.path.join(base, "stage_outline.md")),
+                "adjustment_note": "已结束本轮全书设计，已经写入的内容均已保留。",
+                "stopped": True,
+            }
+
+        def run_stage_operation(
+            operation, stopped_result_factory=stopped_stage_result,
+            operation_label="舞台设计",
+        ):
             """取消当前请求后停在断点；继续时重新执行尚未落盘的这一步。"""
             while True:
                 if stop_event is not None and stop_event.is_set():
-                    return stopped_stage_result()
+                    return stopped_result_factory()
                 if pause_event is not None and not pause_event.is_set():
                     report(
                         "paused", progress_state["completed"], progress_state["total"],
-                        "舞台设计已暂停；点击继续后从当前断点接着生成",
+                        f"{operation_label}已暂停；点击继续后从当前断点接着生成",
                     )
                     pause_event.wait()
                     if stop_event is not None and stop_event.is_set():
-                        return stopped_stage_result()
+                        return stopped_result_factory()
                     if cancel_event is not None:
                         cancel_event.clear()
                 try:
                     result = operation()
                 except LLMCallCancelled:
                     if stop_event is not None and stop_event.is_set():
-                        return stopped_stage_result()
+                        return stopped_result_factory()
                     report(
                         "paused", progress_state["completed"], progress_state["total"],
-                        "当前模型请求已暂停；点击继续后重新生成当前舞台",
+                        f"当前模型请求已暂停；点击继续后重新执行当前{operation_label}步骤",
                     )
                     if pause_event is not None:
                         pause_event.wait()
                     if stop_event is not None and stop_event.is_set():
-                        return stopped_stage_result()
+                        return stopped_result_factory()
                     if cancel_event is not None:
                         cancel_event.clear()
                     continue
                 if stop_event is not None and stop_event.is_set():
-                    stopped = stopped_stage_result()
+                    stopped = stopped_result_factory()
                     # 请求已经返回且产物已写盘时，保留刚完成的写入结果。
                     if isinstance(result, dict):
                         stopped.update({k: v for k, v in result.items() if v})
                         stopped["stopped"] = True
-                        stopped["adjustment_note"] = "已结束本轮舞台设计，已完成内容均已保留。"
+                        stopped["adjustment_note"] = f"已结束本轮{operation_label}，已完成内容均已保留。"
                     return stopped
                 return result
 
@@ -325,9 +339,13 @@ class DesignChatManager:
         is_extend = scope == "stage" and not is_initial and _is_extend_intent(combined_for_llm)
         if is_initial:
             if scope == "concept":
-                result = gen_design_concept(
-                    ws, creative_direction=combined_for_llm,
-                    progress_callback=progress_callback,
+                result = run_stage_operation(
+                    lambda: gen_design_concept(
+                        ws, creative_direction=combined_for_llm,
+                        progress_callback=report, cancel_event=cancel_event,
+                    ),
+                    stopped_result_factory=stopped_concept_result,
+                    operation_label="全书设计",
                 )
             else:
                 result = run_stage_operation(
@@ -340,8 +358,13 @@ class DesignChatManager:
         elif is_concept_stage_sync:
             if progress_callback:
                 progress_callback("generating", 0, 1, "正在同步新增拆解到阶段粗纲")
-            result = sync_stage_outline_from_new_reference(
-                ws, instruction=combined_for_llm,
+            result = run_stage_operation(
+                lambda: sync_stage_outline_from_new_reference(
+                    ws, instruction=combined_for_llm,
+                    cancel_event=cancel_event,
+                ),
+                stopped_result_factory=stopped_concept_result,
+                operation_label="全书设计同步",
             )
             if progress_callback:
                 progress_callback("completed", 1, 1, "阶段粗纲已同步")
@@ -363,8 +386,13 @@ class DesignChatManager:
             if progress_callback and scope == "concept":
                 progress_callback("generating", 0, 1, "正在根据指令调整设计")
             if scope == "concept":
-                result = refine_design_concept(
-                    ws, instruction=combined_for_llm, use_new_reference=False,
+                result = run_stage_operation(
+                    lambda: refine_design_concept(
+                        ws, instruction=combined_for_llm, use_new_reference=False,
+                        cancel_event=cancel_event,
+                    ),
+                    stopped_result_factory=stopped_concept_result,
+                    operation_label="全书设计调整",
                 )
             else:
                 result = run_stage_operation(
@@ -457,8 +485,15 @@ class DesignChatManager:
                         prompt_model=event.get("model", ""),
                         prompt_created_at=event.get("created_at", ""),
                     )
+            def trace_status(message: str) -> None:
+                with self._jobs_lock:
+                    active = self._jobs.get(key)
+                    if active and active.get("id") == job["id"]:
+                        active["message"] = message.removeprefix("[LLMProvider] ")
             trace_context = capture_prompts(trace_prompt)
+            status_context = capture_llm_status(trace_status)
             trace_context.__enter__()
+            status_context.__enter__()
             try:
                 response = self.run_message(
                     workspace, scope, message, attachments,
@@ -495,6 +530,7 @@ class DesignChatManager:
                             message="生成失败", error=str(exc),
                         )
             finally:
+                status_context.__exit__(None, None, None)
                 trace_context.__exit__(None, None, None)
 
         threading.Thread(
@@ -540,43 +576,46 @@ class DesignChatManager:
         )
 
     def pause(self, workspace: str, scope: str) -> dict[str, Any]:
-        if scope != "stage":
-            raise ValueError("当前仅舞台设计支持暂停。")
+        if scope not in _SCOPE_FILES:
+            raise ValueError("不支持的设计步骤。")
+        label = "全书设计" if scope == "concept" else "舞台设计"
         key = (workspace, scope)
         with self._jobs_lock:
             job = self._jobs.get(key)
             if not job or job["status"] not in {"running", "pausing"}:
-                raise ValueError("当前没有可暂停的舞台设计任务。")
+                raise ValueError(f"当前没有可暂停的{label}任务。")
             job["pause_event"].clear()
             job["cancel_event"].set()
             job.update(status="pausing", phase="pausing", message="正在暂停当前模型请求")
         return self.job_status(workspace, scope)
 
     def resume(self, workspace: str, scope: str) -> dict[str, Any]:
-        if scope != "stage":
-            raise ValueError("当前仅舞台设计支持继续。")
+        if scope not in _SCOPE_FILES:
+            raise ValueError("不支持的设计步骤。")
+        label = "全书设计" if scope == "concept" else "舞台设计"
         key = (workspace, scope)
         with self._jobs_lock:
             job = self._jobs.get(key)
             if not job or job["status"] not in {"paused", "pausing"}:
-                raise ValueError("当前没有已暂停的舞台设计任务。")
+                raise ValueError(f"当前没有已暂停的{label}任务。")
             job["cancel_event"].clear()
             job["pause_event"].set()
-            job.update(status="running", phase="generating", message="已继续生成舞台设计")
+            job.update(status="running", phase="generating", message=f"已继续生成{label}")
         return self.job_status(workspace, scope)
 
     def stop(self, workspace: str, scope: str) -> dict[str, Any]:
-        if scope != "stage":
-            raise ValueError("当前仅舞台设计支持结束。")
+        if scope not in _SCOPE_FILES:
+            raise ValueError("不支持的设计步骤。")
+        label = "全书设计" if scope == "concept" else "舞台设计"
         key = (workspace, scope)
         with self._jobs_lock:
             job = self._jobs.get(key)
             if not job or job["status"] not in {"running", "pausing", "paused"}:
-                raise ValueError("当前没有可结束的舞台设计任务。")
+                raise ValueError(f"当前没有可结束的{label}任务。")
             job["stop_event"].set()
             job["cancel_event"].set()
             job["pause_event"].set()
-            job.update(status="stopping", phase="stopping", message="正在结束本轮舞台设计")
+            job.update(status="stopping", phase="stopping", message=f"正在结束本轮{label}")
         return self.job_status(workspace, scope)
 
     def reset(self, workspace: str, scope: str) -> dict[str, Any]:

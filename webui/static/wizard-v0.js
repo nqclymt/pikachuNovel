@@ -107,6 +107,30 @@ function modelConfigFields(groupId, group) {
   </section>`;
 }
 
+function ccSwitchImportMarkup(source, groups) {
+  if (!source?.detected) {
+    return `<section class="cc-switch-import">
+      <header><h3>CC Switch</h3><span class="config-status missing">未检测到</span></header>
+      <p class="cc-switch-status">${escapeHtml(source?.error || "本机没有找到 CC Switch 数据库")}</p>
+    </section>`;
+  }
+  const providers = (source.providers || []).filter((provider) => provider.importable);
+  const preferred = providers.find((provider) => provider.is_current) || providers[0];
+  const options = providers.map((provider) => `<option value="${escapeHtml(provider.id)}" ${provider.id === preferred?.id ? "selected" : ""}>${escapeHtml(provider.name)} · ${escapeHtml(provider.model)}</option>`).join("");
+  const selectors = groups.map(([groupId, group]) => `<label>${escapeHtml(group.label)}
+    <select data-cc-switch-group="${escapeHtml(groupId)}" ${providers.length ? "" : "disabled"}>
+      ${providers.length ? options : '<option value="">没有可导入的 Codex 供应商</option>'}
+    </select>
+  </label>`).join("");
+  return `<section class="cc-switch-import">
+    <header><h3>从 CC Switch 导入</h3><span class="config-status ${providers.length ? "ready" : "missing"}">${providers.length} 个可用</span></header>
+    <p class="config-path">${escapeHtml(source.database_path || "")}</p>
+    <div class="cc-switch-selectors">${selectors}</div>
+    <p id="cc-switch-import-status" class="cc-switch-status"></p>
+    <button id="import-cc-switch" class="secondary-button" type="button" ${providers.length ? "" : "disabled"}>验证并导入</button>
+  </section>`;
+}
+
 async function openSettings() {
   const content = $("#settings-content");
   content.innerHTML = '<p class="settings-loading">正在读取本地配置…</p>';
@@ -114,17 +138,47 @@ async function openSettings() {
   $("#settings-panel").setAttribute("aria-hidden", "false");
   $("#settings-scrim").classList.add("open");
   try {
-    const config = await api("/api/config");
+    const [config, ccSwitch] = await Promise.all([
+      api("/api/config"),
+      api("/api/config/cc-switch").catch((error) => ({ detected: false, error: error.message })),
+    ]);
     const groups = Object.entries(config.groups || {});
     content.innerHTML = `<form id="model-config-form" class="model-config-form">
       <p class="config-path">${escapeHtml(config.config_path || "")}</p>
+      ${ccSwitchImportMarkup(ccSwitch, groups)}
       ${groups.map(([id, group]) => modelConfigFields(id, group)).join("")}
       <div class="settings-actions"><button id="cancel-settings" class="secondary-button" type="button">取消</button><button class="primary-button" type="submit">保存配置</button></div>
     </form>`;
     $("#cancel-settings").addEventListener("click", closeSettings);
+    $("#import-cc-switch")?.addEventListener("click", importCCSwitchConfig);
     $("#model-config-form").addEventListener("submit", saveModelConfig);
   } catch (error) {
     content.innerHTML = `<p class="settings-error">${escapeHtml(error.message || "无法读取配置。")}</p>`;
+  }
+}
+
+async function importCCSwitchConfig(event) {
+  const button = event.currentTarget;
+  const status = $("#cc-switch-import-status");
+  const assignments = {};
+  $$('[data-cc-switch-group]').forEach((select) => {
+    if (select.value) assignments[select.dataset.ccSwitchGroup] = select.value;
+  });
+  button.disabled = true;
+  button.textContent = "验证中";
+  if (status) status.textContent = "正在验证模型、地址和凭据";
+  try {
+    const result = await api("/api/config/cc-switch/import", {
+      method: "POST",
+      body: JSON.stringify({ assignments }),
+    });
+    showToast(`已从 CC Switch 导入 ${Number(result.imported?.length || 0)} 组配置。`);
+    await openSettings();
+  } catch (error) {
+    if (status) status.textContent = error.message || "CC Switch 配置验证失败。";
+    showToast(error.message || "CC Switch 配置验证失败。", true);
+    button.disabled = false;
+    button.textContent = "验证并导入";
   }
 }
 
@@ -1008,14 +1062,15 @@ function designJobMarkup(job) {
   const promptAction = Number(job.prompt_count || 0) > 0
     ? `<button id="show-design-prompt" class="chat-job-action prompt" type="button">Prompt · ${Number(job.prompt_count)}</button>`
     : "";
-  const stageActions = job.progress_kind === "stage_design"
-    ? `<div class="chat-job-actions">${promptAction}${paused
-        ? '<button id="resume-design-job" class="chat-job-action resume" type="button"><span>▶</span>继续</button>'
-        : `<button id="pause-design-job" class="chat-job-action" type="button" ${(pausing || stopping) ? "disabled" : ""}><span>${pausing ? "…" : "Ⅱ"}</span>${pausing ? "暂停中" : "暂停"}</button>`}
-       <button id="stop-design-job" class="chat-job-action stop" type="button" ${stopping ? "disabled" : ""}><span>■</span>${stopping ? "结束中" : "结束"}</button></div>`
-    : (promptAction ? `<div class="chat-job-actions">${promptAction}</div>` : "");
+  const designActions = `<div class="chat-job-actions">${promptAction}${paused
+      ? '<button id="resume-design-job" class="chat-job-action resume" type="button"><span>▶</span>继续</button>'
+      : `<button id="pause-design-job" class="chat-job-action" type="button" ${(pausing || stopping) ? "disabled" : ""}><span>${pausing ? "…" : "Ⅱ"}</span>${pausing ? "暂停中" : "暂停"}</button>`}
+     <button id="stop-design-job" class="chat-job-action stop" type="button" ${stopping ? "disabled" : ""}><span>■</span>${stopping ? "结束中" : "结束"}</button></div>`;
   const progressMeta = job.progress_kind === "design_concept"
-    ? `${completed} / ${total} 项设计 · ${Math.round(completed * 100 / total)}%`
+    ? stopping ? `正在结束 · 已完成 ${completed} / ${total} 项设计`
+    : paused ? `已暂停 · ${completed} / ${total} 项设计`
+    : pausing ? `正在暂停 · ${completed} / ${total} 项设计`
+    : `${completed} / ${total} 项设计 · ${Math.round(completed * 100 / total)}%`
     : stopping ? `正在结束 · 已完成 ${completed} / ${total} 个舞台`
     : paused ? `已暂停 · ${completed} / ${total} 个舞台`
     : `${completed} / ${total} 个舞台 · ${Math.round(completed * 100 / total)}%`;
@@ -1026,7 +1081,7 @@ function designJobMarkup(job) {
         <strong>${escapeHtml(job.message || "正在生成全书设计")}</strong>
         <span>${progressMeta}</span>
       </div>
-      ${stageActions}
+      ${designActions}
     </div>
     <div class="chat-job-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(completed * 100 / total)}"><i style="width:${percent}%"></i></div>
   </div>`;
@@ -2581,6 +2636,8 @@ function closeFileBrowser() {
 
 function taskLabel(task) {
   if (task.status === "running") return "运行中";
+  if (task.status === "stopping") return "停止中";
+  if (task.status === "stopped") return "已停止";
   if (task.status === "succeeded") return "完成";
   if (task.status === "succeeded_with_warnings") return "需检查";
   if (task.status === "failed") return "失败";
@@ -2644,7 +2701,10 @@ async function refreshTasks() {
   if (!wizardState.activeTaskId && tasks[0]) wizardState.activeTaskId = tasks[0].id;
   const activeTask = tasks.find((task) => task.id === wizardState.activeTaskId);
   $("#drawer-prompt-count").textContent = String(Number(activeTask?.prompt_count || 0));
-  $("#delete-current-task").disabled = !activeTask || ["queued", "running"].includes(activeTask.status);
+  const taskRunning = Boolean(activeTask && ["queued", "running", "stopping"].includes(activeTask.status));
+  $("#stop-current-task").disabled = !taskRunning || activeTask.status === "stopping";
+  $("#stop-current-task").textContent = activeTask?.status === "stopping" ? "正在停止" : "停止任务";
+  $("#delete-current-task").disabled = taskRunning;
   $("#copy-current-log").disabled = !activeTask;
   $("#download-current-log").disabled = !activeTask;
   $("#drawer-tasks").innerHTML = tasks.length ? tasks.map((task) => `<button class="drawer-task ${task.id === wizardState.activeTaskId ? "active" : ""}" data-task="${task.id}" type="button"><span><span class="drawer-task-title">${escapeHtml(task.label)}</span><span class="drawer-task-meta">${escapeHtml(task.created_at || "")}</span></span><span class="task-state ${task.status}">${taskLabel(task)}</span></button>`).join("") : '<p class="review-empty">当前工作区还没有任务记录。</p>';
@@ -2668,7 +2728,7 @@ async function refreshLog() {
     }
     wizardState._tasks = wizardState._tasks?.map((item) => item.id === data.task.id ? data.task : item);
     $("#drawer-prompt-count").textContent = String(Number(data.task.prompt_count || 0));
-    if (["succeeded", "succeeded_with_warnings", "failed"].includes(data.task.status) && wizardState.lastSyncedTaskId !== data.task.id) {
+    if (["succeeded", "succeeded_with_warnings", "failed", "stopped"].includes(data.task.status) && wizardState.lastSyncedTaskId !== data.task.id) {
       wizardState.lastSyncedTaskId = data.task.id;
       await refreshTasks();
       await refreshWorkspaceArtifacts();
@@ -2677,7 +2737,9 @@ async function refreshLog() {
         && String(data.task.message || "").includes("重新拆解");
       const message = rebuildRequired
         ? "参考小说源文件已变化，请返回“参考小说”步骤，勾选“清除已有拆解结果并重新拆解”。"
-        : (data.task.status === "failed" ? "任务结束但未成功，请检查日志。" : "任务完成，生成内容已刷新。");
+        : data.task.status === "failed" ? "任务结束但未成功，请检查日志。"
+        : data.task.status === "stopped" ? "任务已停止，已经生成的内容均已保留。"
+        : "任务完成，生成内容已刷新。";
       showToast(message, data.task.status === "failed");
     }
   } catch (_) { /* A server restart clears in-memory task metadata. */ }
@@ -2905,6 +2967,20 @@ async function boot() {
         await refreshTasks();
         showToast("任务记录、日志和 Prompt 已删除。");
       } catch (error) { showToast(error.message || "无法删除任务记录。", true); }
+    });
+    $("#stop-current-task").addEventListener("click", async () => {
+      if (!wizardState.activeTaskId || !confirm("停止当前任务？已经写入工作区的内容会保留。")) return;
+      const button = $("#stop-current-task");
+      button.disabled = true;
+      button.textContent = "正在停止";
+      try {
+        await api(`/api/tasks/${wizardState.activeTaskId}/stop`, { method: "POST" });
+        await refreshTasks();
+        showToast("正在停止任务，请稍候。");
+      } catch (error) {
+        showToast(error.message || "无法停止任务。", true);
+        await refreshTasks();
+      }
     });
     document.addEventListener("click", (event) => {
       const id = event.target.closest("button")?.id;

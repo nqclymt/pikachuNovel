@@ -1,22 +1,100 @@
 import os
 import threading
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from openai import OpenAI
 from core.text_utils import normalize_text
 from core.prompt_trace import record_prompt
 
 # 不值得重试的 HTTP 状态码（认证/余额等确定性错误）
-_NO_RETRY_CODES = {401, 402, 403}
+_NO_RETRY_CODES = {400, 401, 402, 403, 404, 405, 422}
+_DEFAULT_RETRY_DELAY = 1.5
+_MAX_RETRIES_LIMIT = 5
+_WAIT_LOG_INTERVAL = 10.0
+_STATUS_CALLBACK = ContextVar("harness_novel_llm_status_callback", default=None)
 
 
 class LLMCallCancelled(RuntimeError):
     """模型请求被用户主动取消。"""
 
 
+class LLMResponseFormatError(RuntimeError):
+    """服务商返回了非 OpenAI 兼容的响应结构。"""
+
+
+class LLMCallFailed(RuntimeError):
+    """The provider exhausted its bounded attempts without a response."""
+
+    def __init__(self, model, attempts, error):
+        self.model = model
+        self.attempts = attempts
+        self.error = error
+        super().__init__(
+            f"模型 {model} 调用失败，已尝试 {attempts} 次：{error}"
+        )
+
+
+def _resolve_max_retries(requested: int) -> int:
+    """Resolve a bounded retry count shared by synchronous and cancelable calls."""
+    raw = os.getenv("HARNESS_NOVEL_LLM_MAX_RETRIES")
+    try:
+        value = int(raw) if raw is not None and raw.strip() else int(requested)
+    except (TypeError, ValueError):
+        value = int(requested)
+    return max(0, min(_MAX_RETRIES_LIMIT, value))
+
+
+def _retry_delay(attempt: int) -> float:
+    """Return an exponential backoff delay, configurable but always bounded."""
+    try:
+        base = float(os.getenv("HARNESS_NOVEL_LLM_RETRY_DELAY", str(_DEFAULT_RETRY_DELAY)))
+    except (TypeError, ValueError):
+        base = _DEFAULT_RETRY_DELAY
+    base = max(0.0, min(30.0, base))
+    return min(30.0, base * (attempt + 1))
+
+
+def _error_status(error) -> str:
+    status_code = getattr(error, "status_code", None)
+    return f"HTTP {status_code}: " if status_code else ""
+
+
+def _response_content(response, base_url) -> str:
+    """Extract chat content and turn proxy route mistakes into an actionable error."""
+    choices = getattr(response, "choices", None)
+    if not choices:
+        response_type = type(response).__name__
+        raise LLMResponseFormatError(
+            "服务商返回的不是 OpenAI 兼容的 chat.completions 响应"
+            f"（实际类型：{response_type}）。请检查 Base URL；多数服务商要求以 /v1 结尾。"
+            f"当前地址：{base_url or '未设置'}"
+        )
+    return normalize_text(choices[0].message.content)
+
+
+@contextmanager
+def capture_llm_status(callback):
+    """Expose provider attempt and wait status to the current Web job."""
+    token = _STATUS_CALLBACK.set(callback)
+    try:
+        yield
+    finally:
+        _STATUS_CALLBACK.reset(token)
+
+
+def _report_status(message: str) -> None:
+    print(message)
+    callback = _STATUS_CALLBACK.get()
+    if callback is not None:
+        callback(message)
+
+
 class LLMProvider:
     """OpenAI 兼容接口的轻量封装。
 
-    只负责真实 API 调用与重试；失败或未配置 api_key 时返回空串并打印警告，
-    不再静默返回任何假数据（Mock 已移出主路径）。
+    只负责真实 API 调用与有界重试；调用失败时抛出明确异常，避免上层把
+    API 故障误判成模型格式错误并继续重复请求。
     """
 
     def __init__(self, model="mock-model", base_url=None, api_key=None, max_tokens=None):
@@ -53,7 +131,6 @@ class LLMProvider:
             print("[LLMProvider] 未配置 api_key，无法调用模型，返回空内容。")
             return ""
 
-        print(f"[LLMProvider] 正在调用模型 {self.model} ...")
         response_format = {"type": "json_object"} if is_json else None
         messages = [{"role": "user", "content": prompt}]
         kwargs = {
@@ -65,22 +142,48 @@ class LLMProvider:
         if is_json:
             kwargs["response_format"] = response_format
 
-        for attempt in range(max_retries + 1):
+        max_retries = _resolve_max_retries(max_retries)
+        total_attempts = max_retries + 1
+        attempts_made = 0
+        last_error = None
+        for attempt in range(total_attempts):
+            attempts_made = attempt + 1
+            _report_status(
+                f"[LLMProvider] 正在进行第 {attempts_made}/{total_attempts} 次调用：{self.model}"
+            )
             try:
                 response = self.client.chat.completions.create(**kwargs)
-                return normalize_text(response.choices[0].message.content)
+                return _response_content(response, self.base_url)
             except Exception as e:
+                last_error = e
                 status_code = getattr(e, 'status_code', None)
+                if isinstance(e, LLMResponseFormatError):
+                    _report_status(
+                        f"[LLMProvider] 第 {attempts_made}/{total_attempts} 次调用失败，"
+                        f"响应格式错误，不再重试：{e}"
+                    )
+                    break
                 if status_code in _NO_RETRY_CODES:
-                    print(f"[LLMProvider] API 错误 ({status_code})，不可重试。")
+                    _report_status(
+                        f"[LLMProvider] 第 {attempts_made}/{total_attempts} 次调用失败，"
+                        f"HTTP {status_code} 不可重试：{e}"
+                    )
                     break
                 if attempt < max_retries:
-                    print(f"[LLMProvider] API 调用失败（第{attempt+1}次），重试中... 错误: {e}")
+                    delay = _retry_delay(attempt)
+                    _report_status(
+                        f"[LLMProvider] 第 {attempts_made}/{total_attempts} 次调用失败；"
+                        f"{delay:g} 秒后重试。错误：{e}"
+                    )
+                    if delay:
+                        time.sleep(delay)
                 else:
-                    print(f"[LLMProvider] API 调用失败，已重试{max_retries}次。错误: {e}")
+                    _report_status(
+                        f"[LLMProvider] 第 {attempts_made}/{total_attempts} 次调用失败，"
+                        f"已达到重试上限。错误：{e}"
+                    )
 
-        print("[LLMProvider] 调用失败，返回空内容（请检查 API Key / 余额 / 网络）。")
-        return ""
+        raise LLMCallFailed(self.model, attempts_made, last_error)
 
     def generate_cancelable(
         self,
@@ -95,9 +198,14 @@ class LLMProvider:
         record_prompt(prompt, self.model)
         if not self.api_key:
             return ""
-        for attempt in range(max_retries + 1):
+        max_retries = _resolve_max_retries(max_retries)
+        total_attempts = max_retries + 1
+        for attempt in range(total_attempts):
             if cancel_event is not None and cancel_event.is_set():
                 raise LLMCallCancelled("模型请求已取消")
+            _report_status(
+                f"[LLMProvider] 正在进行第 {attempt + 1}/{total_attempts} 次调用：{self.model}"
+            )
             done = threading.Event()
             outcome = {}
             client = self._create_client()
@@ -113,13 +221,15 @@ class LLMProvider:
                     if is_json:
                         kwargs["response_format"] = {"type": "json_object"}
                     response = client.chat.completions.create(**kwargs)
-                    outcome["result"] = normalize_text(response.choices[0].message.content)
+                    outcome["result"] = _response_content(response, self.base_url)
                 except Exception as exc:
                     outcome["error"] = exc
                 finally:
                     done.set()
 
             threading.Thread(target=request, name="llm-cancelable-call", daemon=True).start()
+            started_at = time.monotonic()
+            next_wait_log = started_at + _WAIT_LOG_INTERVAL
             while not done.wait(0.1):
                 if cancel_event is not None and cancel_event.is_set():
                     try:
@@ -127,6 +237,15 @@ class LLMProvider:
                     except Exception:
                         pass
                     raise LLMCallCancelled("模型请求已取消")
+
+                now = time.monotonic()
+                if now >= next_wait_log:
+                    elapsed = int(now - started_at)
+                    _report_status(
+                        f"[LLMProvider] 第 {attempt + 1}/{total_attempts} 次调用仍在等待，"
+                        f"已等待约 {elapsed} 秒..."
+                    )
+                    next_wait_log = now + _WAIT_LOG_INTERVAL
 
             try:
                 client.close()
@@ -137,13 +256,21 @@ class LLMProvider:
 
             error = outcome["error"]
             status_code = getattr(error, "status_code", None)
-            if status_code in _NO_RETRY_CODES or attempt >= max_retries:
+            if (
+                isinstance(error, LLMResponseFormatError)
+                or status_code in _NO_RETRY_CODES
+                or attempt >= max_retries
+            ):
+                _report_status(
+                    f"[LLMProvider] 第 {attempt + 1}/{total_attempts} 次调用失败，"
+                    f"不再重试：{_error_status(error)}{error}"
+                )
                 raise error
 
-            wait_seconds = min(4.0, 1.5 * (attempt + 1))
-            print(
-                f"[LLMProvider] 可取消请求失败（第{attempt + 1}次），"
-                f"{wait_seconds:g}秒后重试... 错误: {error}"
+            wait_seconds = _retry_delay(attempt)
+            _report_status(
+                f"[LLMProvider] 第 {attempt + 1}/{total_attempts} 次调用失败；"
+                f"{wait_seconds:g} 秒后重试。错误：{_error_status(error)}{error}"
             )
             if cancel_event is not None:
                 if cancel_event.wait(wait_seconds):

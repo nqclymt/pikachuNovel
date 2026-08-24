@@ -386,6 +386,8 @@ button:disabled { cursor: not-allowed; }
 .drawer-task-meta { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; }
 .task-state { align-self: center; padding: 3px 7px; border-radius: 999px; color: #55675d; background: #edf2ee; font-size: 10px; font-weight: 700; }
 .task-state.running { color: #076759; background: #e4f3ed; }
+.task-state.stopping { color: #85611c; background: #fff2d7; }
+.task-state.stopped { color: #964335; background: #faebe8; }
 .task-state.failed { color: #964335; background: #faebe8; }
 .task-state.succeeded { color: #3e6f4a; background: #e8f1e9; }
 .task-state.succeeded_with_warnings { color: #85611c; background: #fff2d7; }
@@ -450,6 +452,16 @@ button:disabled { cursor: not-allowed; }
 .model-config-group label { display: grid; gap: 5px; color: #52635b; font-size: 11px; font-weight: 700; }
 .model-config-group input { width: 100%; height: 35px; padding: 0 9px; border: 1px solid var(--line-strong); border-radius: 4px; color: var(--ink); background: #fff; outline: none; font-size: 12px; }
 .model-config-group input:focus { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(11,119,105,.1); }
+.cc-switch-import { display: grid; gap: 10px; padding: 2px 0 15px; border-bottom: 1px solid var(--line); }
+.cc-switch-import > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.cc-switch-import h3 { margin: 0; color: #29483c; font-size: 13px; }
+.cc-switch-import .config-path { margin: 0; }
+.cc-switch-selectors { display: grid; gap: 8px; }
+.cc-switch-selectors label { display: grid; gap: 5px; color: #52635b; font-size: 11px; font-weight: 700; }
+.cc-switch-selectors select { width: 100%; height: 35px; padding: 0 9px; border: 1px solid var(--line-strong); border-radius: 4px; color: var(--ink); background: #fff; outline: none; font-size: 12px; }
+.cc-switch-selectors select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(11,119,105,.1); }
+.cc-switch-status { min-height: 16px; margin: 0; color: #7a5146; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.cc-switch-import > button { justify-self: end; }
 .settings-actions { display: flex; justify-content: flex-end; gap: 9px; padding-top: 2px; }
 .workspace-scrim { position: fixed; inset: 0; z-index: 6; display: none; background: rgba(24,40,34,.3); }
 .workspace-scrim.open { display: block; }

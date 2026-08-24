@@ -681,6 +681,8 @@ class TaskManager:
         self.task_dir.mkdir(parents=True, exist_ok=True)
         self.uploads = uploads
         self._tasks: dict[str, TaskRecord] = {}
+        self._processes: dict[str, subprocess.Popen] = {}
+        self._stop_requested: set[str] = set()
         self._active_workspaces: set[str] = set()
         self._deleting_workspaces: set[str] = set()
         self._lock = threading.RLock()
@@ -723,7 +725,7 @@ class TaskManager:
                 )
             except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
                 continue
-            if record.status in {"queued", "running"}:
+            if record.status in {"queued", "running", "stopping"}:
                 record.status = "failed"
                 record.finished_at = now_iso()
                 record.message = "服务重启，任务已中断"
@@ -763,6 +765,29 @@ class TaskManager:
     def get(self, task_id: str) -> TaskRecord | None:
         with self._lock:
             return self._tasks.get(task_id)
+
+    def stop(self, task_id: str) -> dict[str, Any]:
+        """Stop a queued or running CLI task while preserving completed outputs."""
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                raise KeyError(task_id)
+            if task.status not in {"queued", "running", "stopping"}:
+                raise ValueError("当前任务已经结束，不能再次停止。")
+            if task.status != "stopping":
+                task.status = "stopping"
+                task.message = "正在停止任务"
+                self._stop_requested.add(task_id)
+                self._persist_record(task)
+            process = self._processes.get(task_id)
+
+        self._append_log(task, "\n用户请求停止任务，正在结束当前进程...\n")
+        if process is not None and process.poll() is None:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+        return self._public(task)
 
     def list(self, workspace: str | None = None) -> list[dict[str, Any]]:
         with self._lock:
@@ -828,7 +853,7 @@ class TaskManager:
             task = self._tasks.get(task_id)
             if not task:
                 raise KeyError(task_id)
-            if task.status in {"queued", "running"}:
+            if task.status in {"queued", "running", "stopping"}:
                 raise ValueError("正在运行的任务不能删除。")
             self._tasks.pop(task_id, None)
         removed = []
@@ -854,7 +879,7 @@ class TaskManager:
         removed = 0
         skipped = 0
         for task in tasks:
-            if task.status in {"queued", "running"}:
+            if task.status in {"queued", "running", "stopping"}:
                 skipped += 1
                 continue
             path = self.task_dir / f"{task.id}.prompts.jsonl"
@@ -873,7 +898,7 @@ class TaskManager:
         workspace = require_workspace_name(workspace)
         with self._lock:
             tasks = [task for task in self._tasks.values() if task.workspace == workspace]
-            if any(task.status in {"queued", "running"} for task in tasks):
+            if any(task.status in {"queued", "running", "stopping"} for task in tasks):
                 raise ValueError("该工作区仍有任务正在执行，请先结束任务再删除。")
             task_ids = [task.id for task in tasks]
         for task_id in task_ids:
@@ -885,7 +910,7 @@ class TaskManager:
         workspace = require_workspace_name(workspace)
         with self._lock:
             if workspace in self._active_workspaces or any(
-                task.workspace == workspace and task.status in {"queued", "running"}
+                task.workspace == workspace and task.status in {"queued", "running", "stopping"}
                 for task in self._tasks.values()
             ):
                 raise ValueError("该工作区仍有后台任务正在执行，请先等待或结束任务再删除。")
@@ -897,9 +922,10 @@ class TaskManager:
 
     def _run(self, task: TaskRecord, command: list[str]) -> None:
         with self._lock:
-            task.status = "running"
+            stop_before_start = task.id in self._stop_requested
+            task.status = "stopping" if stop_before_start else "running"
             task.started_at = now_iso()
-            task.message = "正在执行"
+            task.message = "正在停止任务" if stop_before_start else "正在执行"
             self._persist_record(task)
         self._append_log(task, f"开始：{task.label}\n")
         self._append_log(
@@ -930,6 +956,11 @@ class TaskManager:
                 cwd=os.getcwd(),
                 bufsize=1,
             )
+            with self._lock:
+                self._processes[task.id] = process
+                stop_after_start = task.id in self._stop_requested
+            if stop_after_start and process.poll() is None:
+                process.terminate()
             assert process.stdout is not None
             for line in iter(process.stdout.readline, ""):
                 if any(
@@ -952,7 +983,10 @@ class TaskManager:
             exit_code = process.wait()
             with self._lock:
                 task.exit_code = exit_code
-                if exit_code != 0:
+                if task.id in self._stop_requested:
+                    task.status = "stopped"
+                    task.message = "任务已停止，已经写入的内容均已保留"
+                elif exit_code != 0:
                     task.status = "failed"
                     task.message = (
                         "参考小说已变化，请重新拆解"
@@ -976,11 +1010,17 @@ class TaskManager:
                 f"{traceback.format_exc()}",
             )
             with self._lock:
-                task.status = "failed"
-                task.message = "工作台无法启动该任务"
+                if task.id in self._stop_requested:
+                    task.status = "stopped"
+                    task.message = "任务已停止，已经写入的内容均已保留"
+                else:
+                    task.status = "failed"
+                    task.message = "工作台无法启动该任务"
         finally:
             with self._lock:
                 task.finished_at = now_iso()
+                self._processes.pop(task.id, None)
+                self._stop_requested.discard(task.id)
                 self._active_workspaces.discard(task.workspace)
                 self._persist_record(task)
 

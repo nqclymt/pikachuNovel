@@ -1798,7 +1798,7 @@ def _reference_volume_chapter_count(volume, volume_outline):
 
 def gen_design_concept(
     ws, force=False, creative_direction=None, direction_file=None,
-    progress_callback=None,
+    progress_callback=None, cancel_event=None,
 ):
     """串行生成世界观、无阶段粗纲的 rough_outline，以及独立 stage_outline。"""
     print(">>> 全书设计：串行生成世界观、粗略大纲与阶段粗纲 <<<")
@@ -1862,7 +1862,9 @@ def gen_design_concept(
             world_knowledge=world_knowledge or "（未提供目标世界资料库，请创建原创世界。）",
             reference_outline=reference_outline,
         )
-        payload = parse_json_response(_call_design_llm(llm, prompt, "新小说世界观"))
+        payload = parse_json_response(
+            _call_design_llm(llm, prompt, "新小说世界观", cancel_event=cancel_event)
+        )
         worldview = _normalize_design_field(payload, "worldview_md", "# 世界观")
         if not _is_real_design_field(worldview):
             raise RuntimeError("世界观生成失败：模型未返回有效内容，请重试。")
@@ -1881,7 +1883,9 @@ def gen_design_concept(
             reference_outline=reference_outline,
             outline_rules=_load_outline_rules(ws),
         )
-        payload = parse_json_response(_call_design_llm(llm, prompt, "新小说粗略大纲"))
+        payload = parse_json_response(
+            _call_design_llm(llm, prompt, "新小说粗略大纲", cancel_event=cancel_event)
+        )
         rough = _normalize_design_field(payload, "rough_outline_md", "# 粗略大纲")
         rough = _remove_stage_outline_section(rough)
         if not _is_real_design_field(rough):
@@ -1911,7 +1915,10 @@ def gen_design_concept(
                     f"上次生成了 {actual_count} 个阶段，本次必须严格生成 {expected_count} 个阶段。"
                 )
             payload = parse_json_response(
-                _call_design_llm(llm, prompt, f"新小说阶段粗纲（第{attempt}次）")
+                _call_design_llm(
+                    llm, prompt, f"新小说阶段粗纲（第{attempt}次）",
+                    cancel_event=cancel_event,
+                )
             )
             candidate = _normalize_design_field(payload, "stage_outline_md", "# 阶段粗纲")
             if not _is_real_design_field(candidate):
@@ -2147,10 +2154,15 @@ def gen_stage_design(
     }
 
 
-def refine_design_concept(ws, instruction, compact_summary="", use_new_reference=False):
+def refine_design_concept(
+    ws, instruction, compact_summary="", use_new_reference=False,
+    cancel_event=None,
+):
     """普通全书设计微调：模型只读取指令和当前三份设计文件。"""
     if use_new_reference:
-        return sync_stage_outline_from_new_reference(ws, instruction)
+        return sync_stage_outline_from_new_reference(
+            ws, instruction, cancel_event=cancel_event,
+        )
     _ = compact_summary  # 保留调用签名兼容，历史摘要不再进入模型。
     paths = {
         "worldview": _worldview_path(ws),
@@ -2170,7 +2182,9 @@ def refine_design_concept(ws, instruction, compact_summary="", use_new_reference
         rough_outline=current["rough_outline"],
         stage_outline=current["stage_outline"],
     )
-    payload = parse_json_response(_call_design_llm(llm, prompt, "concept 微调"))
+    payload = parse_json_response(
+        _call_design_llm(llm, prompt, "concept 微调", cancel_event=cancel_event)
+    )
     updated = {
         "worldview": _normalize_design_field(payload, "worldview_md", ""),
         "rough_outline": _remove_stage_outline_section(
@@ -2194,7 +2208,7 @@ def refine_design_concept(ws, instruction, compact_summary="", use_new_reference
     return updated
 
 
-def sync_stage_outline_from_new_reference(ws, instruction=""):
+def sync_stage_outline_from_new_reference(ws, instruction="", cancel_event=None):
     """仅用新增拆解内容调整末阶段或追加新阶段，不触碰世界观与粗略大纲。"""
     _ = instruction  # 保留对话入口签名；增量生成严格使用固定结构输入。
     new_cards = _unused_reference_chapter_context(ws)
@@ -2251,7 +2265,10 @@ def sync_stage_outline_from_new_reference(ws, instruction=""):
             reference_volume_structure=reference_structure,
         )
         payload = parse_json_response(
-            _call_design_llm(llm, prompt, f"增量同步阶段粗纲{number}/{target_count}")
+            _call_design_llm(
+                llm, prompt, f"增量同步阶段粗纲{number}/{target_count}",
+                cancel_event=cancel_event,
+            )
         )
         candidate = _normalize_design_field(payload, "stage_outline_md", "")
         numbers = [int(value) for value in STAGE_OUTLINE_HEADING_RE.findall(candidate)]
