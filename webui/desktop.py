@@ -1,4 +1,4 @@
-"""Desktop window for the HarnessNovel web workspace."""
+"""Desktop window for the PikachuNovel web workspace."""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ def run_desktop(
     except ImportError as exc:
         missing = getattr(exc, "name", None) or str(exc)
         raise RuntimeError(
-            f"程序依赖导入失败（{missing}）。请使用当前 Python 重新安装或更新 HarnessNovel。"
+            f"程序依赖导入失败（{missing}）。请使用当前 Python 重新安装或更新 PikachuNovel。"
         ) from exc
 
     selected_port = _available_port(host, port)
@@ -87,7 +87,7 @@ def run_desktop(
     try:
         _wait_until_ready(host, selected_port, server)
         window = webview.create_window(
-            "HarnessNovel 小说工作台",
+            "PikachuNovel 小说工作台",
             f"http://{host}:{selected_port}",
             width=1440,
             height=920,
@@ -105,7 +105,7 @@ def run_desktop(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="启动 HarnessNovel 桌面工作台")
+    parser = argparse.ArgumentParser(description="启动 PikachuNovel 桌面工作台")
     parser.add_argument("--host", default=DEFAULT_HOST, help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="本地服务端口")
     parser.add_argument("--workspace-root", help="工作区根目录")
@@ -123,10 +123,18 @@ def main() -> None:
             debug=args.debug,
         )
     except RuntimeError as exc:
+        try:
+            from pathlib import Path
+
+            Path(os.getenv("TEMP", "."), "PikachuNovel-startup-error.log").write_text(
+                str(exc), encoding="utf-8"
+            )
+        except OSError:
+            pass
         if os.name == "nt":
             import ctypes
 
-            ctypes.windll.user32.MessageBoxW(0, str(exc), "HarnessNovel 启动失败", 0x10)
+            ctypes.windll.user32.MessageBoxW(0, str(exc), "PikachuNovel 启动失败", 0x10)
         raise SystemExit(f"错误：{exc}") from exc
 
 

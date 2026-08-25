@@ -1,4 +1,4 @@
-# HarnessNovel Web Brand Spec
+# PikachuNovel Web Brand Spec
 
 ## Mode
 
@@ -9,7 +9,7 @@ Redesign preserve. The existing CLI workflow, workspace layout, task service and
 - Primary mark: `webui/static/logo.svg`, the open “汉” glyph used beside the wordmark
 - Compact mark: `webui/static/favicon.svg`, the same glyph in a rounded container for small square placements
 - README mark: `docs/logo.svg`, identical to the compact mark
-- Web wordmark: live text (`harnessNovel`); `h`, `a`, and `N` use the mint accent and heavier weight
+- Web wordmark: live text (`PikachuNovel`); `P`, `i`, and `N` use the mint accent and heavier weight
 - README wordmark: `docs/wordmark-light.svg` and `docs/wordmark-dark.svg`, selected by color scheme
 
 ## Visual System

@@ -7,7 +7,6 @@ novels
 dist/
 build/
 release/
-tests/
 .pytest_cache/
 _temp/
 .idea/

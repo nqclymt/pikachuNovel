@@ -16,6 +16,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.text_encoding import read_text_file
+
 
 WORKSPACE_NAME_RE = re.compile(r"^[\w\u4e00-\u9fff][\w .\-\u4e00-\u9fff]{0,79}$", re.UNICODE)
 STAGE_RE = re.compile(r"^#{1,6}\s*(?:舞台|stage)\s*0*(\d+)", re.IGNORECASE | re.MULTILINE)
@@ -224,7 +226,7 @@ class WorkspaceStore:
         world_final_dir = fs / "world_knowledge" / "worlds" / "_final"
         world_sections = sum(
             1 for path in world_final_dir.glob("*.md")
-            if path.is_file() and path.read_text(encoding="utf-8", errors="ignore").strip()
+            if path.is_file() and read_text_file(path)[0].strip()
         ) if world_final_dir.is_dir() else 0
         world_enabled = bool(manifest.get("enabled", True)) if isinstance(manifest, dict) else True
         design_dir = fs / "story_design"
@@ -472,7 +474,7 @@ class WorkspaceStore:
         size = path.stat().st_size
         if size > 1_500_000:
             raise ValueError("文件超过 1.5MB，工作台不直接打开；请使用本地编辑器查看。")
-        content = path.read_text(encoding="utf-8", errors="replace")
+        content = read_text_file(path)[0]
         return {"path": str(path.relative_to(self.workspace_path(name))), "content": content, "size": size}
 
     def write_file(self, name: str, relative_path: str, content: str) -> None:
@@ -616,15 +618,15 @@ class WorkspaceStore:
         if not path.is_file():
             return None
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            return json.loads(read_text_file(path)[0])
+        except (OSError, ValueError, json.JSONDecodeError):
             return None
 
     @staticmethod
     def _stage_count(path: Path) -> int:
         if not path.is_file():
             return 0
-        content = path.read_text(encoding="utf-8", errors="replace")
+        content = read_text_file(path)[0]
         indices = {int(value) for value in STAGE_RE.findall(content)}
         return len(indices)
 
@@ -813,7 +815,7 @@ class TaskManager:
             raise KeyError(task_id)
         offset = max(0, offset)
         path = Path(task.log_path)
-        content = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+        content = read_text_file(path)[0] if path.exists() else ""
         return {
             "task": self._public(task),
             "content": content[offset:],
@@ -838,7 +840,7 @@ class TaskManager:
         path = self.task_dir / f"{task_id}.prompts.jsonl"
         items = []
         if path.is_file():
-            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            for line in read_text_file(path)[0].splitlines():
                 try:
                     item = json.loads(line)
                 except json.JSONDecodeError:
@@ -935,6 +937,7 @@ class TaskManager:
         )
         reported_warning = False
         reference_rebuild_required = False
+        provider_timeout = False
 
         env = os.environ.copy()
         env["HARNESS_NOVEL_HOME"] = str(self.store.root)
@@ -944,6 +947,7 @@ class TaskManager:
         env["HARNESS_NOVEL_PROMPT_TRACE_FILE"] = str(
             self.task_dir / f"{task.id}.prompts.jsonl"
         )
+        process: subprocess.Popen[str] | None = None
         try:
             process = subprocess.Popen(
                 command,
@@ -951,7 +955,7 @@ class TaskManager:
                 stderr=subprocess.STDOUT,
                 text=True,
                 encoding="utf-8",
-                errors="replace",
+                errors="strict",
                 env=env,
                 cwd=os.getcwd(),
                 bufsize=1,
@@ -963,6 +967,8 @@ class TaskManager:
                 process.terminate()
             assert process.stdout is not None
             for line in iter(process.stdout.readline, ""):
+                if "HTTP 524" in line or "origin_response_timeout" in line:
+                    provider_timeout = True
                 if any(
                     marker in line
                     for marker in (
@@ -991,6 +997,8 @@ class TaskManager:
                     task.message = (
                         "参考小说已变化，请重新拆解"
                         if reference_rebuild_required
+                        else "模型服务商响应超时；已保留进度，请稍后继续"
+                        if provider_timeout
                         else f"执行失败（退出码 {exit_code}）"
                     )
                 elif reported_warning:
@@ -1017,12 +1025,22 @@ class TaskManager:
                     task.status = "failed"
                     task.message = "工作台无法启动该任务"
         finally:
+            if process is not None:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                if process.stdout is not None and not process.stdout.closed:
+                    process.stdout.close()
             with self._lock:
                 task.finished_at = now_iso()
+                self._persist_record(task)
                 self._processes.pop(task.id, None)
                 self._stop_requested.discard(task.id)
                 self._active_workspaces.discard(task.workspace)
-                self._persist_record(task)
 
     @staticmethod
     def _append_log(task: TaskRecord, content: str) -> None:

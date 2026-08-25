@@ -45,22 +45,22 @@ if not defined HN_PYTHON (
 )
 
 if not defined HN_PYTHON (
-    echo [HarnessNovel] A working Python 3.9+ interpreter was not found.
-    echo [HarnessNovel] Install Python from https://www.python.org/downloads/windows/ and run this file again.
+    echo [PikachuNovel] A working Python 3.9+ interpreter was not found.
+    echo [PikachuNovel] Install Python from https://www.python.org/downloads/windows/ and run this file again.
     pause
     exit /b 1
 )
 
 %HN_PYTHON% -c "import webview, uvicorn, fastapi, openai" >nul 2>nul
 if errorlevel 1 (
-    echo [HarnessNovel] Installing desktop dependencies for this source checkout...
+    echo [PikachuNovel] Installing desktop dependencies for this source checkout...
     %HN_PYTHON% -m pip install --upgrade ".[desktop]"
     if errorlevel 1 (
-        echo [HarnessNovel] Installation failed. Check the network and the error above.
+        echo [PikachuNovel] Installation failed. Check the network and the error above.
         pause
         exit /b 1
     )
 )
 
 if not defined HN_PYTHONW for /f "delims=" %%I in ('%HN_PYTHON% -c "import pathlib, sys; p=pathlib.Path(sys.executable); w=p.with_name('pythonw.exe'); print(w if w.exists() else p)"') do set "HN_PYTHONW=%%I"
-start "HarnessNovel" "%HN_PYTHONW%" "%~dp0start_desktop.pyw"
+start "PikachuNovel" "%HN_PYTHONW%" "%~dp0start_desktop.pyw"

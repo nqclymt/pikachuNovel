@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from core.prompt_loader import PromptLoader
+from core.text_encoding import read_text_file
 from core.text_utils import normalize_text
 
 
@@ -85,14 +86,7 @@ def _manifest_path(ws):
 # ── 文件 IO ──
 
 def _read_file(path):
-    for encoding in ["utf-8", "utf-8-sig", "gb18030"]:
-        try:
-            with open(path, "r", encoding=encoding) as f:
-                return f.read()
-        except UnicodeDecodeError:
-            continue
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        return f.read()
+    return read_text_file(path)[0]
 
 
 def _write_file(path, content):

@@ -1,8 +1,10 @@
 import os
+import re
 import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
+from typing import Optional
 from openai import OpenAI
 from core.text_utils import normalize_text
 from core.prompt_trace import record_prompt
@@ -11,6 +13,7 @@ from core.prompt_trace import record_prompt
 _NO_RETRY_CODES = {400, 401, 402, 403, 404, 405, 422}
 _DEFAULT_RETRY_DELAY = 1.5
 _MAX_RETRIES_LIMIT = 5
+_MAX_SERVER_RETRY_DELAY = 120.0
 _WAIT_LOG_INTERVAL = 10.0
 _STATUS_CALLBACK = ContextVar("harness_novel_llm_status_callback", default=None)
 
@@ -31,7 +34,7 @@ class LLMCallFailed(RuntimeError):
         self.attempts = attempts
         self.error = error
         super().__init__(
-            f"模型 {model} 调用失败，已尝试 {attempts} 次：{error}"
+            f"模型 {model} 调用失败，已尝试 {attempts} 次：{_error_summary(error)}"
         )
 
 
@@ -53,6 +56,45 @@ def _retry_delay(attempt: int) -> float:
         base = _DEFAULT_RETRY_DELAY
     base = max(0.0, min(30.0, base))
     return min(30.0, base * (attempt + 1))
+
+
+def _server_retry_after(error) -> Optional[float]:
+    """Read Retry-After from OpenAI-compatible exceptions and proxy payloads."""
+    candidates = []
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        candidates.append(headers.get("retry-after"))
+    body = getattr(error, "body", None)
+    if isinstance(body, dict):
+        candidates.append(body.get("retry_after"))
+        nested = body.get("error")
+        if isinstance(nested, dict):
+            candidates.append(nested.get("retry_after"))
+    match = re.search(r"['\"]retry_after['\"]\s*:\s*([0-9.]+)", str(error))
+    if match:
+        candidates.append(match.group(1))
+    for value in candidates:
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            continue
+        if seconds >= 0:
+            return min(_MAX_SERVER_RETRY_DELAY, seconds)
+    return None
+
+
+def _retry_delay_for_error(error, attempt: int) -> float:
+    return max(_retry_delay(attempt), _server_retry_after(error) or 0.0)
+
+
+def _error_summary(error) -> str:
+    status_code = getattr(error, "status_code", None)
+    if status_code == 524 or "origin_response_timeout" in str(error):
+        retry_after = _server_retry_after(error)
+        wait_hint = f"，服务商建议至少等待 {retry_after:g} 秒" if retry_after else ""
+        return f"HTTP 524：模型服务商响应超时{wait_hint}。已保存的任务进度不会丢失"
+    return f"{_error_status(error)}{error}"
 
 
 def _error_status(error) -> str:
@@ -170,17 +212,17 @@ class LLMProvider:
                     )
                     break
                 if attempt < max_retries:
-                    delay = _retry_delay(attempt)
+                    delay = _retry_delay_for_error(e, attempt)
                     _report_status(
                         f"[LLMProvider] 第 {attempts_made}/{total_attempts} 次调用失败；"
-                        f"{delay:g} 秒后重试。错误：{e}"
+                        f"{delay:g} 秒后重试。错误：{_error_summary(e)}"
                     )
                     if delay:
                         time.sleep(delay)
                 else:
                     _report_status(
                         f"[LLMProvider] 第 {attempts_made}/{total_attempts} 次调用失败，"
-                        f"已达到重试上限。错误：{e}"
+                        f"已达到重试上限。错误：{_error_summary(e)}"
                     )
 
         raise LLMCallFailed(self.model, attempts_made, last_error)
@@ -256,21 +298,23 @@ class LLMProvider:
 
             error = outcome["error"]
             status_code = getattr(error, "status_code", None)
-            if (
-                isinstance(error, LLMResponseFormatError)
-                or status_code in _NO_RETRY_CODES
-                or attempt >= max_retries
-            ):
+            if isinstance(error, LLMResponseFormatError) or status_code in _NO_RETRY_CODES:
                 _report_status(
                     f"[LLMProvider] 第 {attempt + 1}/{total_attempts} 次调用失败，"
-                    f"不再重试：{_error_status(error)}{error}"
+                    f"不再重试：{_error_summary(error)}"
                 )
                 raise error
+            if attempt >= max_retries:
+                _report_status(
+                    f"[LLMProvider] 第 {attempt + 1}/{total_attempts} 次调用失败，"
+                    f"已达到重试上限：{_error_summary(error)}"
+                )
+                raise LLMCallFailed(self.model, attempt + 1, error) from error
 
-            wait_seconds = _retry_delay(attempt)
+            wait_seconds = _retry_delay_for_error(error, attempt)
             _report_status(
                 f"[LLMProvider] 第 {attempt + 1}/{total_attempts} 次调用失败；"
-                f"{wait_seconds:g} 秒后重试。错误：{_error_status(error)}{error}"
+                f"{wait_seconds:g} 秒后重试。错误：{_error_summary(error)}"
             )
             if cancel_event is not None:
                 if cancel_event.wait(wait_seconds):

@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="docs/logo.svg" width="96" alt="harnessNovel Logo">
+  <img src="docs/logo.svg" width="96" alt="PikachuNovel Logo">
 </p>
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/wordmark-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="docs/wordmark-light.svg">
-    <img src="docs/wordmark-light.svg" width="320" alt="harnessNovel">
+    <img src="docs/wordmark-light.svg" width="320" alt="PikachuNovel">
   </picture>
 </p>
 
@@ -47,7 +47,7 @@
 - **严重平均化，缺乏创造力与特色**：模型通过海量平均语料训练，倾向于输出"最平均"的内容，导致人物脸谱化、情节套路化，缺乏独特性。
 - **缺乏专业审美与判断力**：AI 训练过程缺少小说好坏的定义和区分，无法理解优秀作品与普通作品的差异，因此生成的内容往往是小说，但和优秀小说还有距离。
 
-**harnessNovel 的解决方案：先拆书，再仿写。**
+**PikachuNovel 的解决方案：先拆书，再仿写。**
 
 不让 AI 凭空创作，而是让它先系统学习一部优秀小说的精华，再基于此进行有根基的创新创作。
 
@@ -55,9 +55,11 @@
 
 详细的 Windows 安装、配置和创作流程请参阅：[中文使用教程](docs/使用教程.md)。
 
+打包版的程序名称为 `PikachuNovel`，自定义 EXE 图标请替换源码中的 `packaging/PikachuNovel.ico`，然后按 [Windows 构建说明](packaging/README.md)重新打包。
+
 ### Windows 独立版（无需 Python）
 
-从 [GitHub Releases](https://github.com/nqclymt/pikachuNovel/releases/latest) 下载 `HarnessNovel.exe`，双击即可启动。首次下载时 Windows 可能显示 SmartScreen 提示，请核对发布者仓库和同一发布页中的 `HarnessNovel.exe.sha256` 后再选择运行。作品默认保存在“文档”目录下的 `my-novels`，升级 EXE 不会删除作品和本地 API 配置。
+从 [GitHub Releases](https://github.com/nqclymt/pikachuNovel/releases/latest) 下载发布页当前版本的 Windows EXE，双击即可启动。首次下载时 Windows 可能显示 SmartScreen 提示，请核对发布者仓库和同一发布页中的 SHA256 文件后再选择运行。作品默认保存在“文档”目录下的 `my-novels`，升级 EXE 不会删除作品和本地 API 配置。
 
 ### 推荐：安装 GitHub 最新桌面版
 

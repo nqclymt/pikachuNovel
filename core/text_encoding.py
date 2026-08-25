@@ -34,7 +34,7 @@ def decode_text_bytes(raw: bytes) -> tuple[str, str]:
     """解码常见网文文本编码，并返回内容及识别出的编码名称。"""
     for marker, encoding, label in _BOM_ENCODINGS:
         if raw.startswith(marker):
-            return raw.decode(encoding), label
+            return raw.decode(encoding).lstrip("\ufeff"), label
 
     try:
         return raw.decode("utf-8"), "UTF-8"
@@ -45,7 +45,13 @@ def decode_text_bytes(raw: bytes) -> tuple[str, str]:
     if from_bytes is not None:
         detected = from_bytes(raw).best()
         if detected and detected.encoding:
-            candidates.append((str(detected), detected.encoding.upper()))
+            detected_name = detected.encoding.lower().replace("_", "-")
+            detected_label = detected.encoding.upper()
+            if detected_name in {"gb18030", "gbk", "gb2312"}:
+                detected_label = "GB18030/GBK"
+            elif detected_name in {"big5", "big5hkscs"}:
+                detected_label = "Big5"
+            candidates.append((str(detected), detected_label))
 
     # GB18030 覆盖 GBK/GB2312，是中文小说最常见的兼容选择；与探测结果一起评分。
     for encoding, label in (("gb18030", "GB18030/GBK"), ("big5", "Big5")):
@@ -60,14 +66,19 @@ def decode_text_bytes(raw: bytes) -> tuple[str, str]:
     if candidates:
         return candidates[0]
 
-    raise ValueError("无法识别参考小说编码。请先转换为 UTF-8 后重新导入。")
+    raise ValueError("无法识别文本文件编码。请先转换为 UTF-8 后重新导入。")
+
+
+def read_text_file(path: str | Path) -> tuple[str, str]:
+    """读取文本文件并返回内容与识别出的编码。"""
+    return decode_text_bytes(Path(path).read_bytes())
 
 
 def copy_as_utf8(source: str | Path, destination: str | Path) -> str:
     """读取源文本并以 UTF-8 写入目标路径，返回源文件识别编码。"""
     source_path = Path(source)
     destination_path = Path(destination)
-    text, encoding = decode_text_bytes(source_path.read_bytes())
+    text, encoding = read_text_file(source_path)
     destination_path.parent.mkdir(parents=True, exist_ok=True)
     destination_path.write_text(text, encoding="utf-8")
     return encoding

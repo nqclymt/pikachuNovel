@@ -56,6 +56,7 @@ const wizardState = {
   directionMode: "text",
   directionFile: null,
   directionFileContent: "",
+  directionUploadId: "",
   chatAttachments: {},
   arcsChatVolume: null,
   chaptersChatVolume: null,
@@ -211,6 +212,22 @@ function showToast(message, error = false) {
   element.classList.add("show");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => element.classList.remove("show"), 3200);
+}
+
+async function checkForUpdates() {
+  try {
+    const update = await api("/api/update-check");
+    if (!update.update_available || !update.release_url) return;
+    const label = update.release_name ? `（${update.release_name}）` : "";
+    if (!window.confirm(`发现 PikachuNovel 新版本 ${update.latest_version}${label}，当前版本为 ${update.current_version}。是否打开发布页更新？`)) return;
+    const opened = await api("/api/update-open", {
+      method: "POST",
+      body: JSON.stringify({ url: update.release_url }),
+    });
+    showToast(opened.opened ? "已打开 GitHub 发布页，请下载新版本后替换当前 EXE。" : "无法自动打开浏览器，请手动访问 GitHub 发布页。", !opened.opened);
+  } catch (_) {
+    // Update checks are optional and must never interrupt the workbench.
+  }
 }
 
 function escapeHtml(value) {
@@ -1169,12 +1186,17 @@ function bindChatAttach(scope) {
     if (!files.length) return;
     let pending = files.length;
     const done = () => { pending -= 1; if (pending === 0) renderChatAttachments(scope); };
-    files.forEach((file) => {
+    files.forEach(async (file) => {
       if (file.size > 1024 * 1024 * 2) { showToast(`「${file.name}」超过 2MB，未加载（请精简后重试）。`, true); done(); return; }
-      const reader = new FileReader();
-      reader.onload = () => { chatAttachments(scope).push({ name: file.name, content: String(reader.result || "") }); done(); };
-      reader.onerror = () => { showToast(`无法读取「${file.name}」。`, true); done(); };
-      reader.readAsText(file, "utf-8");
+      try {
+        const upload = await uploadFile(file);
+        const decoded = await api(`/api/uploads/${encodeURIComponent(upload.id)}/text`);
+        chatAttachments(scope).push({ name: file.name, content: String(decoded.content || "") });
+      } catch (error) {
+        showToast(error.message || `无法读取「${file.name}」。`, true);
+      } finally {
+        done();
+      }
     });
   });
 }
@@ -1572,6 +1594,7 @@ function bindDirectionSource() {
     const file = input.files?.[0] || null;
     wizardState.directionFile = file;
     wizardState.directionFileContent = "";
+    wizardState.directionUploadId = "";
     const status = $("#direction-file-status");
     const preview = $("#direction-file-preview");
     const previewBody = preview?.querySelector("pre");
@@ -1581,20 +1604,21 @@ function bindDirectionSource() {
       return;
     }
     status.textContent = `正在读取：${file.name}`;
-    const reader = new FileReader();
-    reader.onload = () => {
-      wizardState.directionFileContent = String(reader.result || "");
-      status.textContent = `已读取：${file.name}（${wizardState.directionFileContent.length.toLocaleString()} 字符）`;
+    uploadFile(file).then((upload) => {
+      wizardState.directionUploadId = upload.id;
+      return api(`/api/uploads/${encodeURIComponent(upload.id)}/text`);
+    }).then((decoded) => {
+      wizardState.directionFileContent = String(decoded.content || "");
+      status.textContent = `已读取：${file.name}（${decoded.encoding}，${wizardState.directionFileContent.length.toLocaleString()} 字符）`;
       if (previewBody) previewBody.textContent = wizardState.directionFileContent.slice(0, 1800) || "（文件为空）";
       preview.hidden = false;
-    };
-    reader.onerror = () => {
+    }).catch((error) => {
       wizardState.directionFile = null;
+      wizardState.directionUploadId = "";
       status.textContent = "文件读取失败，请重新选择。";
       preview.hidden = true;
-      showToast("无法读取该文件。", true);
-    };
-    reader.readAsText(file, "utf-8");
+      showToast(error.message || "无法读取该文件。", true);
+    });
   });
 }
 
@@ -1827,8 +1851,8 @@ async function _gatherDirectionArgs() {
   const args = {};
   if (wizardState.directionMode === "file") {
     if (!wizardState.directionFile || !wizardState.directionFileContent) throw new Error("请先选择并读取创作方向文件。");
-    const upload = await uploadFile(wizardState.directionFile);
-    args.direction_upload_id = upload.id;
+    if (!wizardState.directionUploadId) throw new Error("创作方向文件尚未完成编码识别。");
+    args.direction_upload_id = wizardState.directionUploadId;
   } else {
     const direction = $("#direction-input")?.value.trim() || "";
     if (!direction) throw new Error("请填写创作方向，或切换为读取文件。");
@@ -2873,6 +2897,7 @@ async function selectWorkspace(name) {
   wizardState.directionMode = "text";
   wizardState.directionFile = null;
   wizardState.directionFileContent = "";
+  wizardState.directionUploadId = "";
   wizardState.referenceFile = null;
   wizardState.referenceScope = "all";
   wizardState.mechanicsMode = "auto";
@@ -2899,6 +2924,7 @@ async function selectWorkspace(name) {
 
 async function boot() {
   try {
+    checkForUpdates();
     const data = await refreshWorkspaceOptions();
     const select = $("#workspace-select");
     select.addEventListener("change", () => selectWorkspace(select.value));

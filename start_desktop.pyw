@@ -7,8 +7,15 @@ import sys
 
 def _restore_frozen_stdout() -> None:
     """Attach a windowed child process to TaskManager's inherited output pipe."""
-    if sys.stdout is not None or os.name != "nt":
+    if os.name != "nt":
         return
+    if sys.stdout is not None:
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+            sys.stderr = sys.stdout
+            return
+        except (AttributeError, OSError, ValueError):
+            pass
     try:
         import ctypes
         import msvcrt
@@ -18,7 +25,9 @@ def _restore_frozen_stdout() -> None:
             return
         descriptor = msvcrt.open_osfhandle(handle, os.O_WRONLY)
         stream = os.fdopen(descriptor, "wb", closefd=True)
-        sys.stdout = io.TextIOWrapper(stream, encoding="utf-8", line_buffering=True)
+        sys.stdout = io.TextIOWrapper(
+            stream, encoding="utf-8", errors="replace", line_buffering=True
+        )
         sys.stderr = sys.stdout
     except (OSError, ValueError):
         pass

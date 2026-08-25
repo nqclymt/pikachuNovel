@@ -8,14 +8,17 @@ from core.llm_provider import (
     LLMCallFailed,
     LLMProvider,
     LLMResponseFormatError,
+    _error_summary,
+    _retry_delay_for_error,
     capture_llm_status,
 )
 
 
 class FakeAPIError(RuntimeError):
-    def __init__(self, message, status_code=None):
+    def __init__(self, message, status_code=None, body=None):
         super().__init__(message)
         self.status_code = status_code
+        self.body = body
 
 
 class FakeCompletions:
@@ -83,6 +86,17 @@ class LLMProviderRetryTests(unittest.TestCase):
         self.assertEqual(raised.exception.attempts, 1)
         sleep.assert_not_called()
 
+    def test_cloudflare_timeout_honors_bounded_retry_after(self):
+        error = FakeAPIError(
+            "origin_response_timeout",
+            status_code=524,
+            body={"retry_after": 120},
+        )
+
+        self.assertEqual(_retry_delay_for_error(error, 0), 120)
+        self.assertIn("服务商响应超时", _error_summary(error))
+        self.assertIn("120 秒", _error_summary(error))
+
     def test_generate_cancelable_stops_after_bounded_attempts(self):
         provider = self.provider([FakeAPIError("offline")])
         clients = []
@@ -95,7 +109,7 @@ class LLMProviderRetryTests(unittest.TestCase):
         provider._create_client = create_client
         cancel_event = threading.Event()
         with patch.dict(os.environ, {"HARNESS_NOVEL_LLM_RETRY_DELAY": "0"}):
-            with self.assertRaises(FakeAPIError):
+            with self.assertRaises(LLMCallFailed):
                 provider.generate_cancelable("prompt", cancel_event, max_retries=2)
 
         self.assertEqual(len(clients), 3)

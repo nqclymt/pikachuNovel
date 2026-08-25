@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from core.llm_provider import LLMCallCancelled, LLMProvider
 from core.prompt_loader import PromptLoader
 from core.config import ConfigLoader
+from core.text_encoding import read_text_file
 from core.text_utils import normalize_text, parse_json_response
 from core.workspace import init_workspace
 from core.adaptation import (
@@ -112,8 +113,7 @@ def _get_lite_llm():
 def _read_file(path):
     if not os.path.exists(path):
         return None
-    with open(path, "r", encoding="utf-8") as f:
-        content = f.read().strip()
+    content = read_text_file(path)[0].strip()
     return content if content else None
 
 

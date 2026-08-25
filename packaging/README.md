@@ -19,7 +19,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_windows.ps1 -C
   -PythonExecutable "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
 ```
 
-输出文件位于 `release\HarnessNovel.exe` 和 `release\HarnessNovel.exe.sha256`。`-Clean` 只清理项目内的 `release` 与 `build\pyinstaller` 生成目录。
+输出文件位于 `release\PikachuNovel.exe` 和 `release\PikachuNovel.exe.sha256`。`-Clean` 只清理项目内的 `release` 与 `build\pyinstaller` 生成目录。
+
+EXE 图标来源是 `packaging\PikachuNovel.ico`。替换该文件后重新执行构建即可。必须使用 Windows `.ico` 格式，建议包含 16、32、48、64、128、256 像素尺寸；单纯把 PNG 改名为 `.ico` 无效。
+
+程序启动时会在后台检查 GitHub 最新稳定版。发现新版本后会询问是否打开发布页；确认后在系统浏览器下载新 EXE，再替换旧文件即可。
+
+发布新版本时，同时更新 `webui\version.py` 中的 `APP_VERSION`、`setup.py` 版本号，并创建同名 Git tag；否则更新提示中的当前版本号会不准确。
 
 构建后可启动隔离的测试配置并验证窗口、健康接口和静态资源：
 

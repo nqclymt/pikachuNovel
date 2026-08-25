@@ -10,7 +10,7 @@ webview_datas, webview_binaries, webview_hiddenimports = collect_all("webview")
 hiddenimports = sorted(set(
     webview_hiddenimports
     + collect_submodules("uvicorn")
-    + ["novel_cli"]
+    + ["novel_cli", "webui.app", "webui.desktop", "webui.update_checker", "webui.version"]
 ))
 
 a = Analysis(
@@ -37,7 +37,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="HarnessNovel",
+    name="PikachuNovel",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -48,5 +48,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(project_root / "packaging" / "HarnessNovel.ico"),
+    icon=str(project_root / "packaging" / "PikachuNovel.ico"),
 )

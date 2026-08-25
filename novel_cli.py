@@ -259,7 +259,8 @@ def _run_reference_pipeline(ws, batch_size, max_chapters=None, resume=False, sou
     # 容错：残留旧分卷 meta.json 的 end_ch 会把 arc_progress 顶高（换源 / 部分拆解后未重算）。
     # 单章事实卡是拆解的真实底座，且已拆解数不可能超过源文件总章节数；据此封顶，避免续拆被误拦、提示失真。
     arc_progress = min(arc_progress, total_chapters, _reference_card_complete_count(ws) or total_chapters)
-    previous_chapters = max(state_progress, arc_progress)
+    card_progress = min(_reference_card_complete_count(ws), total_chapters)
+    previous_chapters = max(state_progress, arc_progress, card_progress)
     if rebuild_reference:
         print("  已请求重新拆解，将清除已有参考拆解资产。")
         previous_chapters = 0
@@ -607,7 +608,7 @@ def cmd_web(args):
         return
 
     app = create_app(workspace_root=args.workspace_root)
-    print(f">>> HarnessNovel Web 工作台已启动：http://{args.host}:{args.port} <<<")
+    print(f">>> PikachuNovel Web 工作台已启动：http://{args.host}:{args.port} <<<")
     print("按 Ctrl+C 停止服务。")
     uvicorn.run(app, host=args.host, port=args.port)
 

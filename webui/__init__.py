@@ -1,1 +1,1 @@
-"""HarnessNovel 本地 Web 工作台。"""
+"""PikachuNovel 本地 Web 工作台。"""

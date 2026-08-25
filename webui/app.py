@@ -1,4 +1,4 @@
-"""HarnessNovel 本地 Web 工作台的 FastAPI 应用。"""
+"""PikachuNovel 本地 Web 工作台的 FastAPI 应用。"""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import webbrowser
 from pathlib import Path
 from typing import Any, Optional
 
@@ -26,6 +27,9 @@ from webui.arc_chat import ArcsChatManager
 from webui.chapter_chat import ChapterOutlineChatManager
 from webui.draft_chat import DraftChatManager
 from webui.cc_switch import load_cc_switch_providers, validate_cc_switch_provider
+from webui.update_checker import check_latest_release
+from webui.version import APP_VERSION, UPDATE_RELEASES_PREFIX, UPDATE_RELEASES_URL
+from core.text_encoding import read_text_file
 from core.workspace import init_workspace
 
 
@@ -54,7 +58,7 @@ CONFIG_GROUPS = {
 
 
 def _effective_config_path() -> Path:
-    """Web 配置始终使用 HarnessNovel 的全局配置文件。"""
+    """Web 配置沿用兼容的全局配置目录，避免升级后丢失用户设置。"""
     return CONFIG_PATH
 
 
@@ -92,7 +96,7 @@ def _read_env() -> tuple[list[str], dict[str, str]]:
     config_path = _effective_config_path()
     if not config_path.is_file():
         return [], {}
-    lines = config_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    lines = read_text_file(config_path)[0].splitlines()
     values: dict[str, str] = {}
     for line in lines:
         stripped = line.strip()
@@ -145,7 +149,7 @@ def _update_env(updates: dict[str, str]) -> None:
     if remaining:
         if output and output[-1].strip():
             output.append("")
-        output.append("# Updated by HarnessNovel Web")
+        output.append("# Updated by PikachuNovel Web")
         for key in CONFIG_KEYS:
             if key in remaining:
                 output.append(f"{key}={remaining.pop(key)}")
@@ -233,7 +237,7 @@ def _http_error(exc: Exception, status_code: int = 400) -> HTTPException:
 
 def create_app(workspace_root: str | None = None) -> FastAPI:
     runtime = WebRuntime(workspace_root)
-    app = FastAPI(title="HarnessNovel Web", version="1.0.0", docs_url=None, redoc_url=None)
+    app = FastAPI(title="PikachuNovel Web", version=APP_VERSION, docs_url=None, redoc_url=None)
     app.state.runtime = runtime
     static_dir = Path(__file__).resolve().parent / "static"
 
@@ -248,6 +252,17 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/update-check")
+    def update_check() -> dict[str, Any]:
+        return check_latest_release()
+
+    @app.post("/api/update-open")
+    def update_open(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        url = str(payload.get("url") or UPDATE_RELEASES_URL).strip()
+        if not url.startswith(UPDATE_RELEASES_PREFIX):
+            raise _http_error(ValueError("更新地址不是受信任的 GitHub Release 地址。"))
+        return {"opened": bool(webbrowser.open(url)), "url": url}
 
     @app.get("/api/settings")
     def settings() -> dict[str, str]:
@@ -636,7 +651,7 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
         try:
             upload_id = str(payload.get("upload_id") or "")
             source = runtime.uploads.resolve(upload_id)
-            content = Path(source).read_text(encoding="utf-8")
+            content = read_text_file(source)[0]
             return runtime.draft_chat.save_writing_guide(name, content, Path(source).name)
         except Exception as exc:
             raise _http_error(exc) from exc
@@ -783,6 +798,19 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
         upload_id = runtime.uploads.register(destination)
         return {"id": upload_id, "name": filename, "size": size}
 
+    @app.get("/api/uploads/{upload_id}/text")
+    def read_uploaded_text(upload_id: str) -> dict[str, Any]:
+        try:
+            source = runtime.uploads.resolve(upload_id)
+            if source.suffix.lower() not in UPLOAD_EXTENSIONS:
+                raise ValueError("该上传文件不是支持的文本格式。")
+            if source.stat().st_size > 2 * 1024 * 1024:
+                raise ValueError("用于对话或预览的文本不能超过 2MB。")
+            content, encoding = read_text_file(source)
+            return {"content": content, "encoding": encoding}
+        except Exception as exc:
+            raise _http_error(exc) from exc
+
     @app.post("/api/tasks")
     def create_task(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         try:
@@ -821,7 +849,7 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
             return FileResponse(
                 path,
                 media_type="text/plain; charset=utf-8",
-                filename=f"harnessNovel-{task.type}-{task.id}.log",
+                filename=f"PikachuNovel-{task.type}-{task.id}.log",
             )
         except KeyError as exc:
             raise _http_error(ValueError("任务不存在。"), 404) from exc

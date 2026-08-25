@@ -17,6 +17,73 @@ class _Store:
 
 
 class TaskRunnerStopTests(unittest.TestCase):
+    def test_child_process_chinese_output_remains_utf8(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = TaskManager(_Store(root), root / "tasks", uploads=None)
+            command = [sys.executable, "-c", "print('中文日志：执行完成')"]
+            with patch.object(manager, "_build_command", return_value=command):
+                task = manager.create("workspace_init", "demo")
+
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and (
+                task.status in {"queued", "running"}
+                or task.id in manager._processes
+            ):
+                time.sleep(0.02)
+
+            log = Path(task.log_path).read_text(encoding="utf-8")
+            self.assertEqual(task.status, "succeeded")
+            self.assertIn("中文日志：执行完成", log)
+            self.assertNotIn("\ufffd", log)
+
+    def test_invalid_child_output_is_not_silently_replaced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = TaskManager(_Store(root), root / "tasks", uploads=None)
+            command = [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write(bytes([255])); sys.stdout.flush()",
+            ]
+            with patch.object(manager, "_build_command", return_value=command):
+                task = manager.create("workspace_init", "demo")
+
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and (
+                task.status in {"queued", "running"}
+                or task.id in manager._processes
+            ):
+                time.sleep(0.02)
+
+            log = Path(task.log_path).read_text(encoding="utf-8")
+            self.assertEqual(task.status, "failed")
+            self.assertIn("UnicodeDecodeError", log)
+            self.assertNotIn("\ufffd", log)
+
+    def test_provider_timeout_has_actionable_task_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = TaskManager(_Store(root), root / "tasks", uploads=None)
+            command = [
+                sys.executable,
+                "-c",
+                "print('HTTP 524: origin_response_timeout'); raise SystemExit(1)",
+            ]
+            with patch.object(manager, "_build_command", return_value=command):
+                task = manager.create("workspace_init", "demo")
+
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and (
+                task.status in {"queued", "running"}
+                or task.id in manager._processes
+            ):
+                time.sleep(0.02)
+
+            self.assertEqual(task.status, "failed")
+            self.assertIn("模型服务商响应超时", task.message)
+            self.assertIn("已保留进度", task.message)
+
     def test_frozen_app_uses_cli_dispatcher(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

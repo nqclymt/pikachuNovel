@@ -28,14 +28,14 @@ if ($Clean) {
 New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
 & $PythonExecutable -m PyInstaller --noconfirm --distpath $OutputPath --workpath $WorkPath $SpecPath
 
-$Executable = Join-Path $OutputPath "HarnessNovel.exe"
+$Executable = Join-Path $OutputPath "PikachuNovel.exe"
 if (-not (Test-Path -LiteralPath $Executable)) {
     throw "PyInstaller did not create $Executable"
 }
 
 $Hash = Get-FileHash -LiteralPath $Executable -Algorithm SHA256
-"$($Hash.Hash.ToLowerInvariant())  HarnessNovel.exe" |
-    Set-Content -LiteralPath (Join-Path $OutputPath "HarnessNovel.exe.sha256") -Encoding ascii
+"$($Hash.Hash.ToLowerInvariant())  PikachuNovel.exe" |
+    Set-Content -LiteralPath (Join-Path $OutputPath "PikachuNovel.exe.sha256") -Encoding ascii
 
 Write-Host "Built: $Executable"
 Write-Host "SHA256: $($Hash.Hash.ToLowerInvariant())"

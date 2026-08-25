@@ -8,6 +8,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 
 from core.world_knowledge import WORLD_SECTIONS, world_knowledge_status
+from core.text_encoding import read_text_file
 
 
 _CORE_SECTIONS = {"世界观", "力量体系", "技能体系"}
@@ -28,13 +29,7 @@ _SECTION_HINTS = {
 
 
 def _read_text(path):
-    for encoding in ("utf-8", "utf-8-sig", "gb18030"):
-        try:
-            with open(path, "r", encoding=encoding) as handle:
-                return handle.read()
-        except UnicodeDecodeError:
-            continue
-    return ""
+    return read_text_file(path)[0]
 
 
 def _write_json(path, payload):

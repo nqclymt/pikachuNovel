@@ -15,6 +15,7 @@ from typing import Any
 from core.config import ConfigLoader
 from core.llm_provider import LLMProvider
 from core.prompt_loader import PromptLoader
+from core.text_encoding import read_text_file
 from core.text_utils import normalize_text, parse_json_response
 
 
@@ -26,8 +27,8 @@ def _read_json(path: Path, default: Any) -> Any:
     if not path.is_file():
         return default
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        data = json.loads(read_text_file(path)[0])
+    except (OSError, ValueError, json.JSONDecodeError):
         return default
     return data
 
@@ -42,7 +43,7 @@ def _write_json(path: Path, payload: Any) -> None:
 def _read_text(path: Path) -> str:
     if not path.is_file():
         return ""
-    return path.read_text(encoding="utf-8", errors="replace").strip()
+    return read_text_file(path)[0].strip()
 
 
 def _write_text(path: Path, content: str) -> None:
