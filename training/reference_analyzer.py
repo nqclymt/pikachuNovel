@@ -169,6 +169,15 @@ class ReferenceAnalyzer:
         print(f"  单章事实卡：目标第 1-{target}/{total_chapters} 章，并发上限 {self.max_workers}")
         cards = self._extract_missing_cards(volume_specs, source_digest)
         self._write_card_index(cards, target, total_chapters)
+        self.state["target_chapters"] = target
+        self.state["total_chapters"] = total_chapters
+        self.state["source_digest"] = source_digest
+        self.state["chapter_cards"] = {
+            "complete_count": len(cards),
+            "completed_ranges": _ranges([int(card["chapter"]) for card in cards]),
+        }
+        self.state["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        _write_json(self.state_path, self.state)
 
         print("\n--- 阶段二：基于事实卡滚动提取故事片段 ---")
         segment_stats = self._extract_story_segments(volume_specs, cards)
@@ -795,6 +804,8 @@ class ReferenceAnalyzer:
                 outline = normalize_text(self._generate_text(prompt, f"卷{spec['index']}结构梳理"))
                 _write_text(outline_path, outline)
                 state["structure_digest"] = digest
+                self.state["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                _write_json(self.state_path, self.state)
             volume_outlines.append({"title": spec["title"], "outline": _read_text(outline_path)})
             segmented_global.extend(spec["global_start"] + local - 1 for local in range(1, closed + 1))
 
@@ -817,6 +828,8 @@ class ReferenceAnalyzer:
                 "segmented_ranges": _ranges(segmented_global),
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
             })
+            self.state["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            _write_json(self.state_path, self.state)
         return {"updated": changed}
 
     def _generate_text(self, prompt: str, label: str) -> str:

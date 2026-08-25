@@ -67,7 +67,7 @@ class CCSwitchAdapterTests(unittest.TestCase):
                 calls.append(kwargs)
 
             def generate(self, *_args, **_kwargs):
-                return "OK"
+                return "流式响应已连续返回足够长度的中文内容，模型地址和调用协议均可正常工作，兼容验证完成"
 
         with patch("webui.cc_switch.LLMProvider", FakeProvider):
             resolved = validate_cc_switch_provider(provider)
@@ -75,6 +75,37 @@ class CCSwitchAdapterTests(unittest.TestCase):
         self.assertEqual(resolved.base_url, "https://api.example.com/v1")
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["api_key"], "secret-key")
+        self.assertEqual(calls[0]["wire_api"], "responses")
+        self.assertEqual(calls[0]["max_tokens"], 96)
+        self.assertEqual(resolved.wire_api, "responses")
+
+    def test_missing_wire_api_probes_responses_before_chat(self):
+        provider = CCSwitchProvider(
+            id="provider-1",
+            name="Demo",
+            model="demo-model",
+            base_url="https://api.example.com/v1",
+            api_key="secret-key",
+            wire_api="",
+            is_current=True,
+        )
+        calls = []
+
+        class FakeProvider:
+            def __init__(self, **kwargs):
+                calls.append(kwargs["wire_api"])
+                self.wire_api = kwargs["wire_api"]
+
+            def generate(self, *_args, **_kwargs):
+                if self.wire_api == "responses":
+                    raise RuntimeError("unsupported")
+                return "Chat 流式响应已连续返回足够长度的中文内容，模型地址和调用协议均可正常工作，兼容验证完成"
+
+        with patch("webui.cc_switch.LLMProvider", FakeProvider):
+            resolved = validate_cc_switch_provider(provider)
+
+        self.assertEqual(calls, ["responses", "chat_completions"])
+        self.assertEqual(resolved.wire_api, "chat_completions")
 
 
 if __name__ == "__main__":

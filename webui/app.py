@@ -29,6 +29,7 @@ from webui.draft_chat import DraftChatManager
 from webui.cc_switch import load_cc_switch_providers, validate_cc_switch_provider
 from webui.update_checker import check_latest_release
 from webui.version import APP_VERSION, UPDATE_RELEASES_PREFIX, UPDATE_RELEASES_URL
+from core.llm_provider import normalize_wire_api
 from core.text_encoding import read_text_file
 from core.workspace import init_workspace
 
@@ -43,12 +44,15 @@ CONFIG_KEYS = [
     "DATA_BUILDER_MODEL",
     "DATA_BUILDER_BASE_URL",
     "DATA_BUILDER_API_KEY",
+    "DATA_BUILDER_WIRE_API",
     "ADAPTIVE_BUILDER_MODEL",
     "ADAPTIVE_BUILDER_BASE_URL",
     "ADAPTIVE_BUILDER_API_KEY",
+    "ADAPTIVE_BUILDER_WIRE_API",
     "ADAPTIVE_BUILDER_LITE_MODEL",
     "ADAPTIVE_BUILDER_LITE_BASE_URL",
     "ADAPTIVE_BUILDER_LITE_API_KEY",
+    "ADAPTIVE_BUILDER_LITE_WIRE_API",
 ]
 CONFIG_GROUPS = {
     "data_builder": ("参考拆解模型", "DATA_BUILDER"),
@@ -115,6 +119,7 @@ def _config_for_client() -> dict[str, Any]:
             "label": label,
             "model": values.get(f"{prefix}_MODEL", ""),
             "base_url": values.get(f"{prefix}_BASE_URL", ""),
+            "wire_api": values.get(f"{prefix}_WIRE_API", "chat_completions"),
             "api_key_configured": bool(values.get(f"{prefix}_API_KEY", "")),
         }
     return {"config_path": str(_effective_config_path()), "groups": groups}
@@ -297,6 +302,11 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
             # API Key 留空即保持已有值，避免浏览器无法回显密钥时误清空。
             if key.endswith("_API_KEY") and not value:
                 continue
+            if key.endswith("_WIRE_API"):
+                try:
+                    value = normalize_wire_api(value)
+                except ValueError as exc:
+                    raise _http_error(exc) from exc
             if value:
                 updates[key] = value
         if updates:
@@ -342,11 +352,13 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
                 updates[f"{prefix}_MODEL"] = resolved.model
                 updates[f"{prefix}_BASE_URL"] = resolved.base_url
                 updates[f"{prefix}_API_KEY"] = resolved.api_key
+                updates[f"{prefix}_WIRE_API"] = resolved.wire_api
                 imported.append({
                     "group": group_id,
                     "provider": resolved.name,
                     "model": resolved.model,
                     "base_url": resolved.base_url,
+                    "wire_api": resolved.wire_api,
                 })
             _update_env(updates)
             from core.config import ConfigLoader

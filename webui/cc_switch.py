@@ -10,7 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from core.llm_provider import LLMProvider
+from core.llm_provider import (
+    LLMProvider,
+    WIRE_API_CHAT,
+    WIRE_API_RESPONSES,
+    normalize_wire_api,
+)
 
 try:
     import tomllib
@@ -182,33 +187,46 @@ def _base_url_candidates(base_url: str) -> list[str]:
 
 
 def validate_cc_switch_provider(provider: CCSwitchProvider) -> CCSwitchProvider:
-    """Resolve a chat-compatible API root; nothing is persisted until this succeeds."""
+    """Resolve a streaming-compatible protocol and API root before persisting it."""
     if not provider.api_key:
         raise ValueError(f"CC Switch 供应商“{provider.name}”没有 API Key。")
     if not provider.model:
         raise ValueError(f"CC Switch 供应商“{provider.name}”没有默认模型。")
+    requested_wire_api = str(provider.wire_api or "").strip()
+    wire_apis = (
+        [normalize_wire_api(requested_wire_api)]
+        if requested_wire_api
+        else [WIRE_API_RESPONSES, WIRE_API_CHAT]
+    )
+    validation_prompt = (
+        "这是 PikachuNovel 的流式长请求兼容性验证。请用中文输出两句话，"
+        "总长度至少四十个汉字，并以“兼容验证完成”结尾。"
+    )
     errors = []
     for base_url in _base_url_candidates(provider.base_url):
-        try:
-            result = LLMProvider(
-                model=provider.model,
-                base_url=base_url,
-                api_key=provider.api_key,
-                max_tokens=2,
-            ).generate("仅回复 OK", max_retries=0, max_tokens=2)
-            if result:
-                return CCSwitchProvider(
-                    id=provider.id,
-                    name=provider.name,
+        for wire_api in wire_apis:
+            try:
+                result = LLMProvider(
                     model=provider.model,
                     base_url=base_url,
                     api_key=provider.api_key,
-                    wire_api=provider.wire_api,
-                    is_current=provider.is_current,
-                )
-        except Exception as exc:  # noqa: BLE001 - aggregate safe validation errors
-            errors.append(f"{base_url}: {exc}")
+                    max_tokens=96,
+                    wire_api=wire_api,
+                ).generate(validation_prompt, max_retries=0, max_tokens=96)
+                if len(result.strip()) >= 20:
+                    return CCSwitchProvider(
+                        id=provider.id,
+                        name=provider.name,
+                        model=provider.model,
+                        base_url=base_url,
+                        api_key=provider.api_key,
+                        wire_api=wire_api,
+                        is_current=provider.is_current,
+                    )
+                errors.append(f"{base_url} [{wire_api}]: 返回内容过短")
+            except Exception as exc:  # noqa: BLE001 - aggregate safe validation errors
+                errors.append(f"{base_url} [{wire_api}]: {exc}")
     detail = errors[-1] if errors else "未返回内容"
     raise ValueError(
-        f"CC Switch 供应商“{provider.name}”无法用于 Chat Completions，配置未导入。{detail}"
+        f"CC Switch 供应商“{provider.name}”未通过流式长请求验证，配置未导入。{detail}"
     )

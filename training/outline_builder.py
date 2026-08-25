@@ -28,6 +28,7 @@ ARC_HEADER_RE = re.compile(
     r'^【情节(?:\d+)?[：:]\s*第(\d+)-(\d+)章(?:[｜|：:](.*?))?】',
     re.MULTILINE,
 )
+SUSPICIOUS_SINGLE_CHAPTER_CHARS = 50_000
 
 
 def _read_and_clean(txt_path):
@@ -121,6 +122,26 @@ def split_chapters(txt_path, max_chapters=None):
     text = _read_and_clean(txt_path)
     volumes = _find_volumes(text)
     chapters = _find_chapters(text)
+    allow_single = os.getenv("HARNESS_NOVEL_ALLOW_SINGLE_CHAPTER", "").strip().lower()
+    detected_count = len(chapters)
+    if (
+        detected_count <= 1
+        and len(text) >= SUSPICIOUS_SINGLE_CHAPTER_CHARS
+        and (
+            detected_count == 0
+            or allow_single not in {"1", "true", "yes", "on"}
+        )
+    ):
+        detection = "未识别到章节" if detected_count == 0 else "只识别到 1 章"
+        raise ValueError(
+            f"源文件约 {len(text):,} 字，但{detection}。为避免把整本小说作为一次模型请求而超时，"
+            "本次拆解已停止。请确认每个章节标题独占一行，格式类似“第1章 标题”；"
+            + (
+                "若这确实是一篇超长单章，可设置 HARNESS_NOVEL_ALLOW_SINGLE_CHAPTER=1 后重试。"
+                if detected_count == 1
+                else "修正章节标题后再重试。"
+            )
+        )
     _assign_volumes_by_position(chapters, volumes)
     if max_chapters is not None:
         if max_chapters < 1:

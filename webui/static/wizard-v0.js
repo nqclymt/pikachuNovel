@@ -104,6 +104,10 @@ function modelConfigFields(groupId, group) {
     <header><h3>${escapeHtml(group.label)}</h3><span class="config-status ${group.api_key_configured ? "ready" : "missing"}">${configured}</span></header>
     <label>模型名称<input name="${prefix}_MODEL" value="${escapeHtml(group.model || "")}" placeholder="例如：deepseek-v4-pro" autocomplete="off" /></label>
     <label>Base URL<input name="${prefix}_BASE_URL" value="${escapeHtml(group.base_url || "")}" placeholder="https://api.example.com" autocomplete="off" /></label>
+    <label>调用协议<select name="${prefix}_WIRE_API">
+      <option value="chat_completions" ${group.wire_api !== "responses" ? "selected" : ""}>Chat Completions（通用兼容接口）</option>
+      <option value="responses" ${group.wire_api === "responses" ? "selected" : ""}>Responses（Codex / OpenAI）</option>
+    </select></label>
     <label>API Key<input name="${prefix}_API_KEY" type="password" placeholder="${group.api_key_configured ? "已配置，留空保持不变" : "请输入 API Key"}" autocomplete="new-password" /></label>
   </section>`;
 }
@@ -117,7 +121,7 @@ function ccSwitchImportMarkup(source, groups) {
   }
   const providers = (source.providers || []).filter((provider) => provider.importable);
   const preferred = providers.find((provider) => provider.is_current) || providers[0];
-  const options = providers.map((provider) => `<option value="${escapeHtml(provider.id)}" ${provider.id === preferred?.id ? "selected" : ""}>${escapeHtml(provider.name)} · ${escapeHtml(provider.model)}</option>`).join("");
+  const options = providers.map((provider) => `<option value="${escapeHtml(provider.id)}" ${provider.id === preferred?.id ? "selected" : ""}>${escapeHtml(provider.name)} · ${escapeHtml(provider.model)} · ${escapeHtml(provider.wire_api || "自动检测")}</option>`).join("");
   const selectors = groups.map(([groupId, group]) => `<label>${escapeHtml(group.label)}
     <select data-cc-switch-group="${escapeHtml(groupId)}" ${providers.length ? "" : "disabled"}>
       ${providers.length ? options : '<option value="">没有可导入的 Codex 供应商</option>'}
@@ -167,7 +171,7 @@ async function importCCSwitchConfig(event) {
   });
   button.disabled = true;
   button.textContent = "验证中";
-  if (status) status.textContent = "正在验证模型、地址和凭据";
+  if (status) status.textContent = "正在验证协议、流式长响应、模型、地址和凭据";
   try {
     const result = await api("/api/config/cc-switch/import", {
       method: "POST",
@@ -188,9 +192,9 @@ async function saveModelConfig(event) {
   const form = event.currentTarget;
   const submit = form.querySelector('button[type="submit"]');
   const values = {};
-  [...form.querySelectorAll('input[name]')].forEach((input) => {
-    const value = input.value.trim();
-    if (value) values[input.name] = value;
+  [...form.querySelectorAll('[name]')].forEach((field) => {
+    const value = field.value.trim();
+    if (value) values[field.name] = value;
   });
   submit.disabled = true;
   try {

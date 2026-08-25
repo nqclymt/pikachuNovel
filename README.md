@@ -236,19 +236,22 @@ novel config
 DATA_BUILDER_MODEL=deepseek-v4-flash
 DATA_BUILDER_BASE_URL=https://api.deepseek.com
 DATA_BUILDER_API_KEY=your-api-key
+DATA_BUILDER_WIRE_API=chat_completions
 
 # 故事情节、逐章章纲、正文及轻量辅助任务（建议 flash 模型）
 ADAPTIVE_BUILDER_LITE_MODEL=deepseek-v4-flash
 ADAPTIVE_BUILDER_LITE_BASE_URL=https://api.deepseek.com
 ADAPTIVE_BUILDER_LITE_API_KEY=your-api-key
+ADAPTIVE_BUILDER_LITE_WIRE_API=chat_completions
 
 # 全书设计与舞台设计（建议 pro 模型，质量高）
 ADAPTIVE_BUILDER_MODEL=deepseek-v4-pro
 ADAPTIVE_BUILDER_BASE_URL=https://api.deepseek.com
 ADAPTIVE_BUILDER_API_KEY=your-api-key
+ADAPTIVE_BUILDER_WIRE_API=chat_completions
 ```
 
-也可通过同名环境变量覆盖配置。三组配置可使用不同的模型和服务商。
+也可通过同名环境变量覆盖配置。三组配置可使用不同的模型、服务商和调用协议。普通兼容接口使用 `chat_completions`；Codex/Responses API 配置使用 `responses`。模型调用默认流式接收长响应，CC Switch 导入会保留并验证供应商的调用协议。
 
 ## 快速开始
 

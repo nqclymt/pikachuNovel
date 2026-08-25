@@ -51,7 +51,7 @@ if not defined HN_PYTHON (
     exit /b 1
 )
 
-%HN_PYTHON% -c "import webview, uvicorn, fastapi, openai" >nul 2>nul
+%HN_PYTHON% -c "import webview, uvicorn, fastapi, openai; from openai.resources.responses.responses import Responses" >nul 2>nul
 if errorlevel 1 (
     echo [PikachuNovel] Installing desktop dependencies for this source checkout...
     %HN_PYTHON% -m pip install --upgrade ".[desktop]"

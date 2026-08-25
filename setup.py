@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="harnessNovel",
-    version="2.0.4",
+    version="2.0.5",
     author="飞鸟 one the way",
     description="长篇网络小说写作 AI Agent",
     long_description=open("README.md", encoding="utf-8").read(),
@@ -24,7 +24,7 @@ setup(
         ],
     },
     install_requires=[
-        "openai",
+        "openai>=1.66.0",
         "charset-normalizer>=3.0",
         "fastapi>=0.110",
         "uvicorn>=0.27",

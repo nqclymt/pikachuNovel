@@ -54,6 +54,7 @@ class ConfigLoader:
             "model": os.getenv(f"{prefix}_MODEL") or env.get(f"{prefix}_MODEL", ""),
             "base_url": os.getenv(f"{prefix}_BASE_URL") or env.get(f"{prefix}_BASE_URL", ""),
             "api_key": os.getenv(f"{prefix}_API_KEY") or env.get(f"{prefix}_API_KEY", ""),
+            "wire_api": os.getenv(f"{prefix}_WIRE_API") or env.get(f"{prefix}_WIRE_API", "chat_completions"),
         }
 
     @classmethod

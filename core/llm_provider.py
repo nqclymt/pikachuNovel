@@ -16,6 +16,8 @@ _MAX_RETRIES_LIMIT = 5
 _MAX_SERVER_RETRY_DELAY = 120.0
 _WAIT_LOG_INTERVAL = 10.0
 _STATUS_CALLBACK = ContextVar("harness_novel_llm_status_callback", default=None)
+WIRE_API_CHAT = "chat_completions"
+WIRE_API_RESPONSES = "responses"
 
 
 class LLMCallCancelled(RuntimeError):
@@ -36,6 +38,21 @@ class LLMCallFailed(RuntimeError):
         super().__init__(
             f"模型 {model} 调用失败，已尝试 {attempts} 次：{_error_summary(error)}"
         )
+
+
+def normalize_wire_api(value, default=WIRE_API_CHAT) -> str:
+    """Normalize CC Switch/OpenAI protocol names to the supported wire APIs."""
+    raw = str(value or default).strip().lower().replace("-", "_")
+    aliases = {
+        "chat": WIRE_API_CHAT,
+        "chat_completion": WIRE_API_CHAT,
+        "chat_completions": WIRE_API_CHAT,
+        "responses": WIRE_API_RESPONSES,
+        "response": WIRE_API_RESPONSES,
+    }
+    if raw not in aliases:
+        raise ValueError(f"不支持的模型调用协议：{value}")
+    return aliases[raw]
 
 
 def _resolve_max_retries(requested: int) -> int:
@@ -102,17 +119,73 @@ def _error_status(error) -> str:
     return f"HTTP {status_code}: " if status_code else ""
 
 
-def _response_content(response, base_url) -> str:
-    """Extract chat content and turn proxy route mistakes into an actionable error."""
-    choices = getattr(response, "choices", None)
-    if not choices:
-        response_type = type(response).__name__
-        raise LLMResponseFormatError(
-            "服务商返回的不是 OpenAI 兼容的 chat.completions 响应"
-            f"（实际类型：{response_type}）。请检查 Base URL；多数服务商要求以 /v1 结尾。"
-            f"当前地址：{base_url or '未设置'}"
-        )
-    return normalize_text(choices[0].message.content)
+def _format_error(wire_api, base_url, response_type) -> LLMResponseFormatError:
+    endpoint = "responses" if wire_api == WIRE_API_RESPONSES else "chat.completions"
+    return LLMResponseFormatError(
+        f"服务商返回的不是 OpenAI 兼容的 {endpoint} 流式响应"
+        f"（实际类型：{response_type}）。请检查调用协议和 Base URL；"
+        f"多数服务商要求地址以 /v1 结尾。当前地址：{base_url or '未设置'}"
+    )
+
+
+def _close_stream(stream) -> None:
+    close = getattr(stream, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
+
+
+def _collect_chat_stream(stream, base_url) -> str:
+    parts = []
+    try:
+        for chunk in stream:
+            choices = getattr(chunk, "choices", None)
+            if not choices:
+                continue
+            delta = getattr(choices[0], "delta", None)
+            content = getattr(delta, "content", None)
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(content, list):
+                for item in content:
+                    text = getattr(item, "text", None)
+                    if isinstance(text, str):
+                        parts.append(text)
+    finally:
+        _close_stream(stream)
+    if not parts:
+        raise _format_error(WIRE_API_CHAT, base_url, type(stream).__name__)
+    return normalize_text("".join(parts))
+
+
+def _collect_responses_stream(stream, base_url) -> str:
+    parts = []
+    completed = False
+    try:
+        for event in stream:
+            event_type = getattr(event, "type", None)
+            if event_type == "response.output_text.delta":
+                delta = getattr(event, "delta", None)
+                if isinstance(delta, str):
+                    parts.append(delta)
+            elif event_type == "response.completed":
+                completed = True
+            elif event_type in {"response.failed", "response.incomplete"}:
+                response = getattr(event, "response", None)
+                error = getattr(response, "error", None) or getattr(response, "incomplete_details", None)
+                raise RuntimeError(f"Responses API 流式生成未完成：{error or event_type}")
+            elif event_type == "error":
+                error = getattr(event, "error", None) or getattr(event, "message", None)
+                raise RuntimeError(f"Responses API 流式传输错误：{error or event_type}")
+    finally:
+        _close_stream(stream)
+    if not parts:
+        raise _format_error(WIRE_API_RESPONSES, base_url, type(stream).__name__)
+    if not completed:
+        raise RuntimeError("Responses API 流在完成事件前结束，已丢弃不完整结果。")
+    return normalize_text("".join(parts))
 
 
 @contextmanager
@@ -139,11 +212,19 @@ class LLMProvider:
     API 故障误判成模型格式错误并继续重复请求。
     """
 
-    def __init__(self, model="mock-model", base_url=None, api_key=None, max_tokens=None):
+    def __init__(
+        self,
+        model="mock-model",
+        base_url=None,
+        api_key=None,
+        max_tokens=None,
+        wire_api=WIRE_API_CHAT,
+    ):
         self.model = model
         self.base_url = base_url
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.max_tokens = max_tokens
+        self.wire_api = normalize_wire_api(wire_api)
         try:
             self.timeout = max(
                 30.0,
@@ -162,6 +243,34 @@ class LLMProvider:
             max_retries=0,
         )
 
+    def _request_text(self, client, prompt, temperature, is_json, max_tokens):
+        effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
+        if self.wire_api == WIRE_API_RESPONSES:
+            kwargs = {
+                "model": self.model,
+                "input": prompt,
+                "stream": True,
+            }
+            if effective_max_tokens is not None:
+                kwargs["max_output_tokens"] = effective_max_tokens
+            if is_json:
+                kwargs["text"] = {"format": {"type": "json_object"}}
+            stream = client.responses.create(**kwargs)
+            return _collect_responses_stream(stream, self.base_url)
+
+        kwargs = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature,
+            "stream": True,
+        }
+        if effective_max_tokens is not None:
+            kwargs["max_tokens"] = effective_max_tokens
+        if is_json:
+            kwargs["response_format"] = {"type": "json_object"}
+        stream = client.chat.completions.create(**kwargs)
+        return _collect_chat_stream(stream, self.base_url)
+
     def generate(self, prompt, temperature=0.7, is_json=False, max_retries=2, max_tokens=None):
         """调用大语言模型生成内容。
 
@@ -173,17 +282,6 @@ class LLMProvider:
             print("[LLMProvider] 未配置 api_key，无法调用模型，返回空内容。")
             return ""
 
-        response_format = {"type": "json_object"} if is_json else None
-        messages = [{"role": "user", "content": prompt}]
-        kwargs = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens or self.max_tokens,
-        }
-        if is_json:
-            kwargs["response_format"] = response_format
-
         max_retries = _resolve_max_retries(max_retries)
         total_attempts = max_retries + 1
         attempts_made = 0
@@ -191,11 +289,13 @@ class LLMProvider:
         for attempt in range(total_attempts):
             attempts_made = attempt + 1
             _report_status(
-                f"[LLMProvider] 正在进行第 {attempts_made}/{total_attempts} 次调用：{self.model}"
+                f"[LLMProvider] 正在进行第 {attempts_made}/{total_attempts} 次调用："
+                f"{self.model}（{self.wire_api}，流式）"
             )
             try:
-                response = self.client.chat.completions.create(**kwargs)
-                return _response_content(response, self.base_url)
+                return self._request_text(
+                    self.client, prompt, temperature, is_json, max_tokens
+                )
             except Exception as e:
                 last_error = e
                 status_code = getattr(e, 'status_code', None)
@@ -246,7 +346,8 @@ class LLMProvider:
             if cancel_event is not None and cancel_event.is_set():
                 raise LLMCallCancelled("模型请求已取消")
             _report_status(
-                f"[LLMProvider] 正在进行第 {attempt + 1}/{total_attempts} 次调用：{self.model}"
+                f"[LLMProvider] 正在进行第 {attempt + 1}/{total_attempts} 次调用："
+                f"{self.model}（{self.wire_api}，流式）"
             )
             done = threading.Event()
             outcome = {}
@@ -254,16 +355,9 @@ class LLMProvider:
 
             def request():
                 try:
-                    kwargs = {
-                        "model": self.model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": temperature,
-                        "max_tokens": max_tokens or self.max_tokens,
-                    }
-                    if is_json:
-                        kwargs["response_format"] = {"type": "json_object"}
-                    response = client.chat.completions.create(**kwargs)
-                    outcome["result"] = _response_content(response, self.base_url)
+                    outcome["result"] = self._request_text(
+                        client, prompt, temperature, is_json, max_tokens
+                    )
                 except Exception as exc:
                     outcome["error"] = exc
                 finally:

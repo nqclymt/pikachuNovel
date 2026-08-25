@@ -22,16 +22,19 @@ def cmd_config(args):
   DATA_BUILDER_MODEL=deepseek-v4-flash
   DATA_BUILDER_BASE_URL=https://api.deepseek.com
   DATA_BUILDER_API_KEY=your-api-key
+  DATA_BUILDER_WIRE_API=chat_completions
 
   # 全书设计与舞台设计（建议 pro 模型）
   ADAPTIVE_BUILDER_MODEL=deepseek-v4-pro
   ADAPTIVE_BUILDER_BASE_URL=https://api.deepseek.com
   ADAPTIVE_BUILDER_API_KEY=your-api-key
+  ADAPTIVE_BUILDER_WIRE_API=chat_completions
 
   # 故事情节、逐章章纲、正文及轻量辅助任务（建议 flash 模型）
   ADAPTIVE_BUILDER_LITE_MODEL=deepseek-v4-flash
   ADAPTIVE_BUILDER_LITE_BASE_URL=https://api.deepseek.com
   ADAPTIVE_BUILDER_LITE_API_KEY=your-api-key
+  ADAPTIVE_BUILDER_LITE_WIRE_API=chat_completions
   """
       with open(env_path, "w", encoding="utf-8") as f:
           f.write(template)
