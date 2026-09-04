@@ -449,7 +449,7 @@ class WorkspaceStore:
             )
             for directory in dirs:
                 path = root_path / directory
-                entries.append({"path": str(path.relative_to(base)), "type": "directory"})
+                entries.append({"path": path.relative_to(base).as_posix(), "type": "directory"})
                 if len(entries) >= max_entries:
                     return entries
             for filename in sorted(files):
@@ -460,7 +460,7 @@ class WorkspaceStore:
                     size = path.stat().st_size
                 except OSError:
                     continue
-                entries.append({"path": str(path.relative_to(base)), "type": "file", "size": size})
+                entries.append({"path": path.relative_to(base).as_posix(), "type": "file", "size": size})
                 if len(entries) >= max_entries:
                     return entries
         return entries
@@ -475,7 +475,7 @@ class WorkspaceStore:
         if size > 1_500_000:
             raise ValueError("文件超过 1.5MB，工作台不直接打开；请使用本地编辑器查看。")
         content = read_text_file(path)[0]
-        return {"path": str(path.relative_to(self.workspace_path(name))), "content": content, "size": size}
+        return {"path": path.relative_to(self.workspace_path(name)).as_posix(), "content": content, "size": size}
 
     def write_file(self, name: str, relative_path: str, content: str) -> None:
         path = self._safe_file_path(name, relative_path)

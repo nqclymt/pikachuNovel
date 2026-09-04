@@ -38,6 +38,22 @@ class TextEncodingTests(unittest.TestCase):
             self.assertEqual(encoding, "GB18030/GBK")
             self.assertEqual(preview["content"], self.SAMPLE)
 
+    def test_workspace_tree_uses_browser_safe_posix_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = root / "demo" / "reference" / "outlines" / "vol_01_全书" / "story_arcs" / "arc_001_ch001_007.md"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_text("# 故事片段", encoding="utf-8")
+
+            store = WorkspaceStore(root)
+            items = store.tree("demo")
+            paths = {item["path"] for item in items}
+            expected = "reference/outlines/vol_01_全书/story_arcs/arc_001_ch001_007.md"
+
+            self.assertIn(expected, paths)
+            self.assertTrue(all("\\" not in path for path in paths))
+            self.assertEqual(store.read_file("demo", expected)["path"], expected)
+
 
 if __name__ == "__main__":
     unittest.main()
