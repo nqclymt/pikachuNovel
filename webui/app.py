@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import webbrowser
 from pathlib import Path
 from typing import Any, Optional
@@ -27,6 +28,7 @@ from webui.arc_chat import ArcsChatManager
 from webui.chapter_chat import ChapterOutlineChatManager
 from webui.draft_chat import DraftChatManager
 from webui.cc_switch import load_cc_switch_providers, validate_cc_switch_provider
+from webui.auto_updater import AutoUpdateError, auto_update_capability, prepare_auto_update
 from webui.update_checker import check_latest_release
 from webui.version import APP_VERSION, UPDATE_RELEASES_PREFIX, UPDATE_RELEASES_URL
 from core.llm_provider import normalize_wire_api
@@ -220,6 +222,23 @@ class WebRuntime:
                 for key in keys:
                     values.pop(key, None)
 
+    def has_active_work(self) -> bool:
+        if any(task["status"] in {"queued", "running", "stopping"} for task in self.tasks.list()):
+            return True
+        for manager in (self.design_chat, self.arcs_chat, self.chapters_chat, self.draft_chat):
+            lock = getattr(manager, "_jobs_lock", None) or getattr(manager, "_lock", None)
+            jobs = getattr(manager, "_jobs", {})
+            if lock is None:
+                continue
+            with lock:
+                if any(
+                    isinstance(job, dict)
+                    and job.get("status") in {"running", "pausing", "paused", "stopping"}
+                    for job in jobs.values()
+                ):
+                    return True
+        return False
+
     def delete_workspace(self, name: str) -> dict[str, Any]:
         name = require_workspace_name(name)
         managers = (self.design_chat, self.arcs_chat, self.chapters_chat, self.draft_chat)
@@ -260,7 +279,24 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
 
     @app.get("/api/update-check")
     def update_check() -> dict[str, Any]:
-        return check_latest_release()
+        result = check_latest_release()
+        result.update(auto_update_capability())
+        return result
+
+    @app.post("/api/update-install")
+    def update_install() -> dict[str, Any]:
+        if runtime.has_active_work():
+            raise _http_error(ValueError("仍有生成任务正在执行或暂停，请结束任务后再更新。"), 409)
+        try:
+            result = prepare_auto_update()
+        except AutoUpdateError as exc:
+            raise _http_error(exc) from exc
+        # 更新辅助进程已启动且新 EXE 已校验、暂存。给 HTTP 响应留出发送时间后退出，
+        # Windows 辅助进程会等待文件解锁，再替换并重启当前程序。
+        timer = threading.Timer(1.5, lambda: os._exit(0))
+        timer.daemon = True
+        timer.start()
+        return result
 
     @app.post("/api/update-open")
     def update_open(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:

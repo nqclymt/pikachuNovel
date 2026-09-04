@@ -218,22 +218,66 @@ function showToast(message, error = false) {
   toastTimer = setTimeout(() => element.classList.remove("show"), 3200);
 }
 
-async function checkForUpdates() {
+let latestUpdate = null;
+
+function renderUpdateState(update) {
+  latestUpdate = update || null;
+  const button = $("#update-app");
+  if (!button) return;
+  const available = Boolean(update?.update_available && update?.release_url);
+  button.classList.toggle("has-update", available);
+  button.title = available
+    ? `发现新版本 ${update.latest_version}，点击更新`
+    : "检查并更新 PikachuNovel";
+}
+
+async function checkForUpdates({ notify = false } = {}) {
   try {
     const update = await api("/api/update-check");
-    if (!update.update_available || !update.release_url) return;
+    renderUpdateState(update);
+    if (notify && !update.update_available) showToast("当前已经是最新版本。");
+    return update;
+  } catch (_) {
+    // Update checks are optional and must never interrupt the workbench.
+    if (notify) showToast("暂时无法检查更新，请稍后重试。", true);
+    return null;
+  }
+}
+
+async function startUpdate() {
+  const button = $("#update-app");
+  if (!button) return;
+  button.disabled = true;
+  try {
+    const update = latestUpdate || await checkForUpdates();
+    if (!update) return;
+    if (!update.update_available || !update.release_url) {
+      showToast("当前已经是最新版本。");
+      return;
+    }
     const label = update.release_name ? `（${update.release_name}）` : "";
-    if (!window.confirm(`发现 PikachuNovel 新版本 ${update.latest_version}${label}，当前版本为 ${update.current_version}。是否打开发布页更新？`)) return;
+    if (update.auto_update_supported) {
+      if (!window.confirm(`发现 PikachuNovel 新版本 ${update.latest_version}${label}，当前版本为 ${update.current_version}。\n\n点击“确定”后将下载并校验新版本，完成后程序会自动重启。`)) return;
+      button.textContent = "正在更新…";
+      const installed = await api("/api/update-install", { method: "POST" });
+      showToast(installed.message || "更新已下载，程序即将自动重启。");
+      return;
+    }
+    const reason = update.auto_update_reason ? `\n\n${update.auto_update_reason}` : "";
+    if (!window.confirm(`发现 PikachuNovel 新版本 ${update.latest_version}${label}，当前版本为 ${update.current_version}。${reason}\n\n是否打开 GitHub 发布页手动更新？`)) return;
     const opened = await api("/api/update-open", {
       method: "POST",
       body: JSON.stringify({ url: update.release_url }),
     });
     showToast(opened.opened ? "已打开 GitHub 发布页，请下载新版本后替换当前 EXE。" : "无法自动打开浏览器，请手动访问 GitHub 发布页。", !opened.opened);
-  } catch (_) {
-    // Update checks are optional and must never interrupt the workbench.
+  } catch (error) {
+    showToast(error.message || "无法开始更新。", true);
+  } finally {
+    button.disabled = false;
+    button.innerHTML = '<span>更新</span><span id="update-dot" class="update-dot" aria-hidden="true"></span>';
+    renderUpdateState(latestUpdate);
   }
 }
-
 function escapeHtml(value) {
   return String(value || "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" })[char]);
 }
@@ -2929,6 +2973,7 @@ async function selectWorkspace(name) {
 async function boot() {
   try {
     checkForUpdates();
+    $("#update-app").addEventListener("click", startUpdate);
     const data = await refreshWorkspaceOptions();
     const select = $("#workspace-select");
     select.addEventListener("change", () => selectWorkspace(select.value));

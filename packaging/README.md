@@ -23,7 +23,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_windows.ps1 -C
 
 EXE 图标来源是 `packaging\PikachuNovel.ico`。项目同时保留 `packaging\PikachuNovel.png` 源图；替换 PNG 后应先转换为包含 16、24、32、48、64、128、256 像素的 Windows `.ico`，再执行构建。单纯把 PNG 改名为 `.ico` 无效。
 
-程序启动时会在后台检查 GitHub 最新稳定版。发现新版本后会询问是否打开发布页；确认后在系统浏览器下载新 EXE，再替换旧文件即可。
+程序启动时会在后台检查 GitHub 最新稳定版。Windows 打包 EXE 检测到新版本后，可直接点击顶部“更新”：程序只接受同一 GitHub Release 中的 `PikachuNovel.exe` 与 `PikachuNovel.exe.sha256`，下载后先校验 SHA256，再退出当前进程、替换 EXE 并自动重启。若新版本启动后立即退出，更新辅助程序会尝试恢复并重启旧版本。源码/Python 运行模式不会自动覆盖文件，而是保留打开 Release 页的手动更新方式。
 
 发布新版本时，同时更新 `webui\version.py` 中的 `APP_VERSION`、`setup.py` 版本号，并创建同名 Git tag；否则更新提示中的当前版本号会不准确。
 

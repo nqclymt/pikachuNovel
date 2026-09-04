@@ -92,6 +92,9 @@ button:disabled { cursor: not-allowed; }
 .subtle-button:hover { color: var(--ink); }
 .drawer-button { padding: 0 11px; border: 1px solid var(--line-strong); color: #355246; background: #fff; }
 .drawer-button:hover { border-color: var(--primary); color: var(--primary); }
+.update-button { position: relative; display: inline-flex; align-items: center; gap: 6px; }
+.update-dot { display: none; width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: #d92d20; box-shadow: 0 0 0 2px #fff; }
+.update-button.has-update .update-dot { display: inline-block; }
 .primary-button { padding: 0 13px; border: 1px solid var(--primary); color: #fff; background: var(--primary); }
 .primary-button:hover { background: var(--primary-deep); border-color: var(--primary-deep); transform: translateY(-1px); }
 .secondary-button { padding: 0 12px; border: 1px solid var(--line-strong); color: #294238; background: #fff; }

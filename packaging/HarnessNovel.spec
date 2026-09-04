@@ -10,7 +10,7 @@ webview_datas, webview_binaries, webview_hiddenimports = collect_all("webview")
 hiddenimports = sorted(set(
     webview_hiddenimports
     + collect_submodules("uvicorn")
-    + ["novel_cli", "webui.app", "webui.desktop", "webui.update_checker", "webui.version"]
+    + ["novel_cli", "webui.app", "webui.desktop", "webui.auto_updater", "webui.update_checker", "webui.version"]
 ))
 
 a = Analysis(

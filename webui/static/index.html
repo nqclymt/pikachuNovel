@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#f5f7f5" />
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
     <title>PikachuNovel 工作台</title>
-  <link rel="stylesheet" href="/assets/wizard-v0.css?v=47" />
+  <link rel="stylesheet" href="/assets/wizard-v0.css?v=48" />
   </head>
   <body>
     <div class="wizard-shell">
@@ -38,7 +38,7 @@
       <main class="stage">
         <header class="stagebar">
           <div class="stagebar-left"><span class="stage-path">分步创作与人工确认</span><span class="stage-separator"></span><span id="step-count" class="step-count">STEP 01 / 07</span></div>
-          <div class="stagebar-right"><button id="open-settings" class="drawer-button" type="button">大模型 API 配置</button><button id="open-task-drawer" class="drawer-button" type="button">任务与日志</button></div>
+          <div class="stagebar-right"><button id="update-app" class="drawer-button update-button" type="button" title="检查并更新 PikachuNovel"><span>更新</span><span id="update-dot" class="update-dot" aria-hidden="true"></span></button><button id="open-settings" class="drawer-button" type="button">大模型 API 配置</button><button id="open-task-drawer" class="drawer-button" type="button">任务与日志</button></div>
         </header>
         <div id="step-canvas" class="step-canvas"></div>
       </main>
@@ -87,6 +87,6 @@
       </form>
     </section>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/assets/wizard-v0.js?v=49"></script>
+  <script src="/assets/wizard-v0.js?v=51"></script>
   </body>
 </html>
