@@ -207,7 +207,7 @@ Windows 10/11 通常已具备窗口所需的 WebView2 Runtime；若窗口创建�
 ## 环境要求
 
 - Python 3.9+
-- LLM API：需支持 OpenAI 兼容接口（DeepSeek、智谱 GLM、Kimi 等）
+- LLM API：需支持 OpenAI 兼容接口（DeepSeek、智谱 GLM、Kimi、Claude/Grok 的兼容网关等）
 
 ## 安装
 
@@ -251,7 +251,7 @@ ADAPTIVE_BUILDER_API_KEY=your-api-key
 ADAPTIVE_BUILDER_WIRE_API=chat_completions
 ```
 
-也可通过同名环境变量覆盖配置。三组配置可使用不同的模型、服务商和调用协议。普通兼容接口使用 `chat_completions`；Codex/Responses API 配置使用 `responses`。模型调用默认流式接收长响应，CC Switch 导入会保留并验证供应商的调用协议。
+也可通过同名环境变量覆盖配置。三组配置可使用不同的模型、服务商和调用协议。普通兼容接口使用 `chat_completions`；Codex/Responses API 配置使用 `responses`。模型调用默认流式接收长响应，CC Switch 导入会保留并验证供应商的调用协议。CC Switch 还支持读取 Claude Desktop 和 Grok Build 的兼容网关配置。
 
 ## 快速开始
 

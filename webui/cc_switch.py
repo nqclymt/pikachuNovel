@@ -1,4 +1,4 @@
-"""Read-only adapter for importing Codex providers from CC Switch."""
+"""Read-only adapter for importing compatible providers from CC Switch."""
 
 from __future__ import annotations
 
@@ -17,6 +17,14 @@ from core.llm_provider import (
     normalize_wire_api,
 )
 
+
+SUPPORTED_APP_TYPES = ("codex", "claude-desktop", "grokbuild")
+SOURCE_LABELS = {
+    "codex": "Codex",
+    "claude-desktop": "Claude Desktop",
+    "grokbuild": "Grok Build",
+}
+
 try:
     import tomllib
 except ImportError:  # Python 3.9/3.10 compatibility
@@ -32,6 +40,7 @@ class CCSwitchProvider:
     api_key: str
     wire_api: str
     is_current: bool
+    source_type: str = "codex"
 
     def public(self) -> dict[str, object]:
         return {
@@ -41,6 +50,8 @@ class CCSwitchProvider:
             "base_url": self.base_url,
             "wire_api": self.wire_api,
             "is_current": self.is_current,
+            "source_type": self.source_type,
+            "source_label": SOURCE_LABELS.get(self.source_type, self.source_type),
             "api_key_configured": bool(self.api_key),
             "importable": bool(self.model and self.base_url and self.api_key),
         }
@@ -117,6 +128,86 @@ def _parse_codex_config(settings: dict) -> dict[str, str]:
     }
 
 
+def _parse_claude_desktop_config(settings: dict, provider_name: str) -> dict[str, str]:
+    env = settings.get("env") if isinstance(settings.get("env"), dict) else {}
+    model = str(
+        env.get("OPENAI_MODEL")
+        or env.get("ANTHROPIC_MODEL")
+        or settings.get("model")
+        or ""
+    ).strip()
+    if not model and str(provider_name or "").strip().lower().startswith("grok"):
+        model = str(provider_name).strip()
+    return {
+        "model": model,
+        "base_url": str(
+            env.get("OPENAI_BASE_URL")
+            or env.get("ANTHROPIC_BASE_URL")
+            or settings.get("base_url")
+            or ""
+        ).strip(),
+        "api_key": str(
+            env.get("OPENAI_API_KEY")
+            or env.get("ANTHROPIC_AUTH_TOKEN")
+            or env.get("ANTHROPIC_API_KEY")
+            or ""
+        ).strip(),
+        "wire_api": str(settings.get("wire_api") or "").strip(),
+    }
+
+
+def _parse_grokbuild_fallback(config_text: str) -> dict[str, str]:
+    default_match = re.search(r'(?m)^\s*default\s*=\s*[\"\'](.*?)[\"\']\s*$', config_text)
+    model_name = default_match.group(1).strip() if default_match else ""
+    sections: dict[str, dict[str, str]] = {}
+    current = ""
+    for raw_line in config_text.splitlines():
+        line = raw_line.strip()
+        section_match = re.fullmatch(r'\[model\.[\"\'](.*?)[\"\']\]', line)
+        if section_match:
+            current = section_match.group(1).strip()
+            sections.setdefault(current, {})
+            continue
+        match = re.match(r'([A-Za-z0-9_]+)\s*=\s*[\"\'](.*?)[\"\']', line)
+        if current and match:
+            sections[current][match.group(1)] = match.group(2)
+    if not model_name and sections:
+        model_name = next(iter(sections))
+    entry = sections.get(model_name, {})
+    return {
+        "model": str(entry.get("model") or model_name).strip(),
+        "base_url": str(entry.get("base_url") or "").strip(),
+        "api_key": str(entry.get("api_key") or "").strip(),
+        "wire_api": str(entry.get("wire_api") or "").strip(),
+    }
+
+
+def _parse_grokbuild_config(settings: dict) -> dict[str, str]:
+    config_text = settings.get("config") if isinstance(settings.get("config"), str) else ""
+    if not config_text:
+        return {"model": "", "base_url": "", "api_key": "", "wire_api": ""}
+    if tomllib is None:
+        return _parse_grokbuild_fallback(config_text)
+    try:
+        parsed = tomllib.loads(config_text)
+    except (TypeError, tomllib.TOMLDecodeError):
+        return _parse_grokbuild_fallback(config_text)
+    models = parsed.get("models") if isinstance(parsed.get("models"), dict) else {}
+    model_name = str(models.get("default") or "").strip()
+    model_table = parsed.get("model") if isinstance(parsed.get("model"), dict) else {}
+    if not model_name and model_table:
+        model_name = str(next(iter(model_table))).strip()
+    entry = model_table.get(model_name, {}) if model_name else {}
+    if not isinstance(entry, dict):
+        entry = {}
+    return {
+        "model": str(entry.get("model") or model_name).strip(),
+        "base_url": str(entry.get("base_url") or "").strip(),
+        "api_key": str(entry.get("api_key") or "").strip(),
+        "wire_api": str(entry.get("wire_api") or "").strip(),
+    }
+
+
 def load_cc_switch_providers(database_path: Path | None = None) -> tuple[Path | None, list[CCSwitchProvider]]:
     path = database_path or discover_cc_switch_database()
     if path is None:
@@ -124,10 +215,12 @@ def load_cc_switch_providers(database_path: Path | None = None) -> tuple[Path | 
     path = path.resolve()
     try:
         connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=2)
+        placeholders = ",".join("?" for _ in SUPPORTED_APP_TYPES)
         rows = connection.execute(
-            "SELECT id, name, settings_config, is_current FROM providers "
-            "WHERE app_type = 'codex' "
-            "ORDER BY is_current DESC, COALESCE(sort_index, 999999), created_at, id"
+            "SELECT id, app_type, name, settings_config, is_current FROM providers "
+            f"WHERE app_type IN ({placeholders}) "
+            "ORDER BY is_current DESC, COALESCE(sort_index, 999999), created_at, id",
+            SUPPORTED_APP_TYPES,
         ).fetchall()
     except sqlite3.Error as exc:
         raise ValueError(f"无法读取 CC Switch 数据库：{exc}") from exc
@@ -136,38 +229,54 @@ def load_cc_switch_providers(database_path: Path | None = None) -> tuple[Path | 
             connection.close()
 
     providers = []
-    for provider_id, name, raw_settings, is_current in rows:
+    for provider_id, app_type, name, raw_settings, is_current in rows:
         try:
             settings = json.loads(raw_settings)
         except (TypeError, json.JSONDecodeError):
             continue
         if not isinstance(settings, dict):
             continue
-        codex = _parse_codex_config(settings)
-        auth = settings.get("auth") if isinstance(settings.get("auth"), dict) else {}
-        api_key = str(
-            auth.get("OPENAI_API_KEY")
-            or codex.get("experimental_bearer_token")
-            or ""
-        ).strip()
-        model = codex.get("model", "")
-        if not model:
-            catalog = settings.get("modelCatalog")
-            catalog_models = catalog.get("models") if isinstance(catalog, dict) else []
-            if isinstance(catalog_models, list):
-                for item in catalog_models:
-                    if isinstance(item, dict) and (item.get("model") or item.get("id")):
-                        model = str(item.get("model") or item.get("id")).strip()
-                        break
+
+        if app_type == "codex":
+            codex = _parse_codex_config(settings)
+            auth = settings.get("auth") if isinstance(settings.get("auth"), dict) else {}
+            api_key = str(
+                auth.get("OPENAI_API_KEY")
+                or codex.get("experimental_bearer_token")
+                or ""
+            ).strip()
+            model = codex.get("model", "")
+            if not model:
+                catalog = settings.get("modelCatalog")
+                catalog_models = catalog.get("models") if isinstance(catalog, dict) else []
+                if isinstance(catalog_models, list):
+                    for item in catalog_models:
+                        if isinstance(item, dict) and (item.get("model") or item.get("id")):
+                            model = str(item.get("model") or item.get("id")).strip()
+                            break
+            parsed_provider = {
+                "model": model,
+                "base_url": codex.get("base_url", ""),
+                "api_key": api_key,
+                "wire_api": codex.get("wire_api", ""),
+            }
+        elif app_type == "claude-desktop":
+            parsed_provider = _parse_claude_desktop_config(settings, str(name))
+        elif app_type == "grokbuild":
+            parsed_provider = _parse_grokbuild_config(settings)
+        else:
+            continue
+
         providers.append(
             CCSwitchProvider(
                 id=str(provider_id),
                 name=str(name),
-                model=model,
-                base_url=codex.get("base_url", ""),
-                api_key=api_key,
-                wire_api=codex.get("wire_api", ""),
+                model=parsed_provider.get("model", ""),
+                base_url=parsed_provider.get("base_url", ""),
+                api_key=parsed_provider.get("api_key", ""),
+                wire_api=parsed_provider.get("wire_api", ""),
                 is_current=bool(is_current),
+                source_type=str(app_type),
             )
         )
     return path, providers
@@ -222,6 +331,7 @@ def validate_cc_switch_provider(provider: CCSwitchProvider) -> CCSwitchProvider:
                         api_key=provider.api_key,
                         wire_api=wire_api,
                         is_current=provider.is_current,
+                        source_type=provider.source_type,
                     )
                 errors.append(f"{base_url} [{wire_api}]: 返回内容过短")
             except Exception as exc:  # noqa: BLE001 - aggregate safe validation errors

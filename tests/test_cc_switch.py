@@ -50,6 +50,77 @@ class CCSwitchAdapterTests(unittest.TestCase):
             self.assertNotIn("api_key", public)
             self.assertTrue(public["api_key_configured"])
 
+    def test_loads_grok_from_claude_desktop_provider(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "cc-switch.db"
+            connection = sqlite3.connect(database)
+            connection.execute(
+                "CREATE TABLE providers ("
+                "id TEXT, app_type TEXT, name TEXT, settings_config TEXT, "
+                "is_current INTEGER, sort_index INTEGER, created_at INTEGER)"
+            )
+            settings = {
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://relay.example.com/openai/v1",
+                    "ANTHROPIC_AUTH_TOKEN": "grok-secret",
+                }
+            }
+            connection.execute(
+                "INSERT INTO providers VALUES (?, 'claude-desktop', ?, ?, 1, 0, 1)",
+                ("grok-desktop", "grok-4.5", json.dumps(settings)),
+            )
+            connection.commit()
+            connection.close()
+
+            _path, providers = load_cc_switch_providers(database)
+
+            self.assertEqual(len(providers), 1)
+            provider = providers[0]
+            self.assertEqual(provider.model, "grok-4.5")
+            self.assertEqual(provider.base_url, "https://relay.example.com/openai/v1")
+            self.assertEqual(provider.api_key, "grok-secret")
+            self.assertEqual(provider.source_type, "claude-desktop")
+            self.assertEqual(provider.public()["source_label"], "Claude Desktop")
+            self.assertTrue(provider.public()["importable"])
+
+    def test_loads_grokbuild_default_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "cc-switch.db"
+            connection = sqlite3.connect(database)
+            connection.execute(
+                "CREATE TABLE providers ("
+                "id TEXT, app_type TEXT, name TEXT, settings_config TEXT, "
+                "is_current INTEGER, sort_index INTEGER, created_at INTEGER)"
+            )
+            settings = {
+                "config": (
+                    '[models]\n'
+                    'default = "grok-4.5"\n\n'
+                    '[model."grok-4.5"]\n'
+                    'model = "grok-4.5"\n'
+                    'base_url = "https://grok.example.com/v1"\n'
+                    'name = "Example"\n'
+                    'api_key = "grokbuild-secret"\n'
+                )
+            }
+            connection.execute(
+                "INSERT INTO providers VALUES (?, 'grokbuild', ?, ?, 1, 0, 1)",
+                ("grok-build", "Example Grok", json.dumps(settings)),
+            )
+            connection.commit()
+            connection.close()
+
+            _path, providers = load_cc_switch_providers(database)
+
+            self.assertEqual(len(providers), 1)
+            provider = providers[0]
+            self.assertEqual(provider.model, "grok-4.5")
+            self.assertEqual(provider.base_url, "https://grok.example.com/v1")
+            self.assertEqual(provider.api_key, "grokbuild-secret")
+            self.assertEqual(provider.source_type, "grokbuild")
+            self.assertEqual(provider.public()["source_label"], "Grok Build")
+            self.assertTrue(provider.public()["importable"])
+
     def test_validation_tries_normalized_v1_url_first(self):
         provider = CCSwitchProvider(
             id="provider-1",

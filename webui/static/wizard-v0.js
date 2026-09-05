@@ -79,6 +79,7 @@ const wizardState = {
 };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
+let settingsConfigGroups = [];
 
 async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers: { ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }), ...(options.headers || {}) } });
@@ -114,26 +115,55 @@ function modelConfigFields(groupId, group) {
 
 function ccSwitchImportMarkup(source, groups) {
   if (!source?.detected) {
-    return `<section class="cc-switch-import">
-      <header><h3>CC Switch</h3><span class="config-status missing">未检测到</span></header>
-      <p class="cc-switch-status">${escapeHtml(source?.error || "本机没有找到 CC Switch 数据库")}</p>
+    return `<section id="cc-switch-import-panel" class="cc-switch-import">
+      <header><h3>CC Switch</h3><div class="cc-switch-header-actions"><span class="config-status missing">未检测到</span><button id="refresh-cc-switch" class="secondary-button cc-switch-refresh-button" type="button">刷新配置</button></div></header>
+      <p id="cc-switch-import-status" class="cc-switch-status">${escapeHtml(source?.error || "本机没有找到 CC Switch 数据库")}</p>
     </section>`;
   }
   const providers = (source.providers || []).filter((provider) => provider.importable);
   const preferred = providers.find((provider) => provider.is_current) || providers[0];
-  const options = providers.map((provider) => `<option value="${escapeHtml(provider.id)}" ${provider.id === preferred?.id ? "selected" : ""}>${escapeHtml(provider.name)} · ${escapeHtml(provider.model)} · ${escapeHtml(provider.wire_api || "自动检测")}</option>`).join("");
+  const options = providers.map((provider) => `<option value="${escapeHtml(provider.id)}" ${provider.id === preferred?.id ? "selected" : ""}>${escapeHtml(provider.name)} · ${escapeHtml(provider.source_label || provider.source_type || "CC Switch")} · ${escapeHtml(provider.model)} · ${escapeHtml(provider.wire_api || "自动检测")}</option>`).join("");
   const selectors = groups.map(([groupId, group]) => `<label>${escapeHtml(group.label)}
     <select data-cc-switch-group="${escapeHtml(groupId)}" ${providers.length ? "" : "disabled"}>
-      ${providers.length ? options : '<option value="">没有可导入的 Codex 供应商</option>'}
+      ${providers.length ? options : '<option value="">没有可导入的兼容供应商</option>'}
     </select>
   </label>`).join("");
-  return `<section class="cc-switch-import">
-    <header><h3>从 CC Switch 导入</h3><span class="config-status ${providers.length ? "ready" : "missing"}">${providers.length} 个可用</span></header>
+  return `<section id="cc-switch-import-panel" class="cc-switch-import">
+    <header><h3>从 CC Switch 导入</h3><div class="cc-switch-header-actions"><span class="config-status ${providers.length ? "ready" : "missing"}">${providers.length} 个可用</span><button id="refresh-cc-switch" class="secondary-button cc-switch-refresh-button" type="button">刷新配置</button></div></header>
     <p class="config-path">${escapeHtml(source.database_path || "")}</p>
     <div class="cc-switch-selectors">${selectors}</div>
     <p id="cc-switch-import-status" class="cc-switch-status"></p>
     <button id="import-cc-switch" class="secondary-button" type="button" ${providers.length ? "" : "disabled"}>验证并导入</button>
   </section>`;
+}
+
+function bindCCSwitchImportActions() {
+  $("#import-cc-switch")?.addEventListener("click", importCCSwitchConfig);
+  $("#refresh-cc-switch")?.addEventListener("click", refreshCCSwitchConfig);
+}
+
+async function refreshCCSwitchConfig(event) {
+  const button = event.currentTarget;
+  const status = $("#cc-switch-import-status");
+  button.disabled = true;
+  button.textContent = "刷新中";
+  if (status) status.textContent = "正在重新读取本机 CC Switch 配置…";
+  try {
+    const ccSwitch = await api(`/api/config/cc-switch?refresh=${Date.now()}`, { cache: "no-store" });
+    const panel = $("#cc-switch-import-panel");
+    if (!panel) return;
+    panel.outerHTML = ccSwitchImportMarkup(ccSwitch, settingsConfigGroups);
+    bindCCSwitchImportActions();
+    const providers = (ccSwitch.providers || []).filter((provider) => provider.importable);
+    const refreshedStatus = $("#cc-switch-import-status");
+    if (refreshedStatus) refreshedStatus.textContent = `已刷新，共 ${providers.length} 个可用供应商。`;
+    showToast(`CC Switch 配置已刷新，共 ${providers.length} 个可用供应商。`);
+  } catch (error) {
+    if (status) status.textContent = error.message || "CC Switch 配置刷新失败。";
+    showToast(error.message || "CC Switch 配置刷新失败。", true);
+    button.disabled = false;
+    button.textContent = "刷新配置";
+  }
 }
 
 async function openSettings() {
@@ -148,6 +178,7 @@ async function openSettings() {
       api("/api/config/cc-switch").catch((error) => ({ detected: false, error: error.message })),
     ]);
     const groups = Object.entries(config.groups || {});
+    settingsConfigGroups = groups;
     content.innerHTML = `<form id="model-config-form" class="model-config-form">
       <p class="config-path">${escapeHtml(config.config_path || "")}</p>
       ${ccSwitchImportMarkup(ccSwitch, groups)}
@@ -155,7 +186,7 @@ async function openSettings() {
       <div class="settings-actions"><button id="cancel-settings" class="secondary-button" type="button">取消</button><button class="primary-button" type="submit">保存配置</button></div>
     </form>`;
     $("#cancel-settings").addEventListener("click", closeSettings);
-    $("#import-cc-switch")?.addEventListener("click", importCCSwitchConfig);
+    bindCCSwitchImportActions();
     $("#model-config-form").addEventListener("submit", saveModelConfig);
   } catch (error) {
     content.innerHTML = `<p class="settings-error">${escapeHtml(error.message || "无法读取配置。")}</p>`;

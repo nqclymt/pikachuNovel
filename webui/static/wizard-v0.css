@@ -457,6 +457,8 @@ button:disabled { cursor: not-allowed; }
 .model-config-group input:focus { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(11,119,105,.1); }
 .cc-switch-import { display: grid; gap: 10px; padding: 2px 0 15px; border-bottom: 1px solid var(--line); }
 .cc-switch-import > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.cc-switch-header-actions { display: flex; align-items: center; gap: 7px; }
+.cc-switch-refresh-button { min-height: 26px; padding: 4px 9px; font-size: 10px; line-height: 1; }
 .cc-switch-import h3 { margin: 0; color: #29483c; font-size: 13px; }
 .cc-switch-import .config-path { margin: 0; }
 .cc-switch-selectors { display: grid; gap: 8px; }
