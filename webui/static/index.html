@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#f5f7f5" />
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
     <title>PikachuNovel 工作台</title>
-  <link rel="stylesheet" href="/assets/wizard-v0.css?v=48" />
+  <link rel="stylesheet" href="/assets/wizard-v0.css?v=51" />
   </head>
   <body>
     <div class="wizard-shell">
@@ -48,23 +48,31 @@
       <div class="drawer-header"><h2>任务与日志</h2><button id="close-task-drawer" class="drawer-close" type="button" title="关闭">&times;</button></div>
       <div id="drawer-tasks" class="drawer-list"></div>
       <div class="drawer-view-tabs" role="tablist">
-        <button class="active" type="button" data-task-view="log">执行日志</button>
-        <button type="button" data-task-view="prompt">模型 Prompt <span id="drawer-prompt-count">0</span></button>
+        <button class="active" type="button" data-task-view="log" aria-selected="true">执行日志</button>
+        <button type="button" data-task-view="prompt" aria-selected="false">模型 Prompt <span id="drawer-prompt-count">0</span></button>
+      </div>
+      <div class="drawer-active-summary">
+        <div><strong id="drawer-active-task-label">请选择任务</strong><span id="drawer-active-task-state" class="task-state">空闲</span></div>
+        <p id="drawer-active-task-message">选择任务后查看执行状态、实时日志和模型 Prompt。</p>
       </div>
       <div class="drawer-history-actions">
+        <button id="toggle-log-follow" class="log-action" type="button">跟随输出：开</button>
         <button id="copy-current-log" class="log-action" type="button" disabled>复制日志</button>
         <button id="download-current-log" class="log-action" type="button" disabled>下载日志</button>
-        <button id="clear-workspace-prompts" type="button">清空 Prompt</button>
+        <button id="clear-workspace-prompts" class="prompt-action" type="button" hidden>清空 Prompt</button>
         <button id="stop-current-task" class="danger" type="button" disabled>停止任务</button>
-        <button id="delete-current-task" class="danger" type="button">删除任务记录</button>
+        <button id="delete-current-task" class="danger" type="button" disabled>删除任务记录</button>
       </div>
-      <pre id="drawer-log" class="drawer-log">选择任务后，这里显示实时输出。</pre>
+      <div id="drawer-log-shell" class="drawer-log-shell">
+        <pre id="drawer-log" class="drawer-log">选择任务后，这里显示实时输出。</pre>
+        <button id="drawer-log-new" class="drawer-log-new" type="button" hidden>有新日志 ↓</button>
+      </div>
       <div id="drawer-prompts" class="drawer-prompts" hidden><p class="drawer-prompt-empty">该任务尚未调用大模型。</p></div>
     </aside>
     <dialog id="prompt-dialog" class="prompt-dialog">
       <header><div><p id="prompt-dialog-meta">模型调用</p><h2>实际输入 Prompt</h2></div><button id="close-prompt-dialog" class="drawer-close" type="button" title="关闭">&times;</button></header>
       <div id="prompt-dialog-list" class="prompt-dialog-list"></div>
-      <footer><button id="copy-current-prompt" class="secondary-button" type="button">复制当前 Prompt</button></footer>
+      <footer><button id="copy-current-prompt" class="secondary-button" type="button" disabled>复制当前 Prompt</button></footer>
     </dialog>
     <div id="file-scrim" class="file-scrim"></div>
     <aside id="file-browser" class="file-browser" aria-label="工作区文件">
@@ -87,6 +95,6 @@
       </form>
     </section>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/assets/wizard-v0.js?v=51"></script>
+  <script src="/assets/wizard-v0.js?v=53"></script>
   </body>
 </html>

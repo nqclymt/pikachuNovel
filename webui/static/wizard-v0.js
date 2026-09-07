@@ -76,6 +76,9 @@ const wizardState = {
   systemPanelStatus: null,
   taskView: "log",
   currentPromptText: "",
+  currentPromptId: "",
+  promptRenderKey: "",
+  logFollow: true,
 };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -589,7 +592,8 @@ function arcsChatPanelMarkup(volume, conversation, job = null) {
   const arcsExist = Boolean(conversation?.has_arcs) || Boolean(volumeInfo?.arcs?.length);
   const placeholder = "描述对情节单元的调整要求，例如「情节单元1增加一个反转」「主角在情节单元3中实力突破」…";
   const messages = turns.map(chatMessageMarkup).join("");
-  const resetBtn = (turns.length || arcsExist) ? '<button id="reset-arcs-chat" class="chat-icon-btn" type="button" title="删除本卷情节单元并重新开始">⟳ 重置</button>' : "";
+  const busy = Boolean(job && ["running", "pausing", "paused", "stopping"].includes(job.status));
+  const resetBtn = (turns.length || arcsExist) ? `<button id="reset-arcs-chat" class="chat-icon-btn" type="button" title="${busy ? "先结束当前生成任务，结束后即可删除已生成内容" : "删除本舞台已生成的情节单元并重新开始"}" ${busy ? "disabled" : ""}>${busy ? "结束任务后可删除" : "删除本舞台产物"}</button>` : "";
   const emptyHint = arcsExist ? "选择舞台后在下方输入调整要求。首次进入请先选择舞台并描述需求。" : "选择舞台后，输入关于情节设计的灵感或需求，开始生成故事情节单元。";
   return `<section class="chat-panel" id="arcs-chat" data-volume="${volume}">
     <header class="chat-panel-bar"><span class="chat-panel-bar-label">舞台 / 卷号</span>${selector}</header>
@@ -809,7 +813,8 @@ function chaptersChatPanelMarkup(volume, arcIdx, conversation, job = null) {
   const turns = (conversation && Array.isArray(conversation.turns)) ? conversation.turns : [];
   const placeholder = "描述对本批章纲的调整要求，例如「第1章情绪基调更压抑」「第3章单章简介加强反转」…";
   const messages = turns.map(chatMessageMarkup).join("");
-  const resetBtn = (turns.length || conversation?.has_outlines) ? '<button id="reset-chapters-chat" class="chat-icon-btn" type="button" title="删除本批章纲和系统面板并重新开始">⟳ 重置</button>' : "";
+  const busy = Boolean(job && ["running", "pausing", "paused", "stopping"].includes(job.status));
+  const resetBtn = (turns.length || conversation?.has_outlines) ? `<button id="reset-chapters-chat" class="chat-icon-btn" type="button" title="${busy ? "先结束当前生成任务，结束后即可删除已生成内容" : "删除当前情节单元已生成的章纲和系统面板"}" ${busy ? "disabled" : ""}>${busy ? "结束任务后可删除" : "删除本批产物"}</button>` : "";
   const emptyHint = arcs.length ? "选择舞台和情节单元后，输入描述开始生成逐章章纲。" : "该舞台还没有故事情节单元，请先在「故事情节」步骤中生成。";
   const panel = wizardState.systemPanelStatus || { selection_mode: "auto", decided: false, enabled: false };
   const panelResult = panel.unavailable
@@ -1035,8 +1040,9 @@ function draftChatPanelMarkup(volume, arcIdx, conversation, job = null) {
   const detail = volumes.find((item) => Number(item.volume) === Number(volume)) || { arcs: [] };
   const arcs = detail.arcs || [], turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
   const guide = conversation?.writing_guide || {};
+  const busy = Boolean(job && ["running", "pausing", "paused", "stopping"].includes(job.status));
   const resetBtn = (turns.length || conversation?.has_drafts)
-    ? '<button id="reset-draft-chat" class="chat-icon-btn" type="button" title="删除当前情节单元的全部正文并重新开始">⟳ 重置</button>'
+    ? `<button id="reset-draft-chat" class="chat-icon-btn" type="button" title="${busy ? "先结束当前生成任务，结束后即可删除已生成正文" : "删除当前情节单元的全部正文并重新开始"}" ${busy ? "disabled" : ""}>${busy ? "结束任务后可删除" : "删除本批正文"}</button>`
     : "";
   const volumeSelector = `<select id="draft-chat-volume">${volumes.map((item) => `<option value="${item.volume}" ${Number(volume) === Number(item.volume) ? "selected" : ""}>第 ${item.volume} 舞台 / 卷</option>`).join("")}</select>`;
   const arcSelector = arcs.length ? `<select id="draft-chat-arc">${arcs.map((arc) => `<option value="${arc.idx}" ${Number(arcIdx) === Number(arc.idx) ? "selected" : ""}>情节单元${arc.idx}${arc.title ? ` · ${escapeHtml(arc.title)}` : ""}（第${arc.start_ch}-${arc.end_ch}章）</option>`).join("")}</select>` : '<select id="draft-chat-arc" disabled><option>该舞台暂无故事情节</option></select>';
@@ -1192,7 +1198,7 @@ function designChatPanelMarkup(scope, conversation, job = null) {
     ? "描述本轮要调整的内容（在上一版基础上整文件重写，未涉及部分保留）…"
     : (scope === "concept" ? "写下题材、主角、金手指、冲突或任何灵感，开始生成第一版…" : "基于粗略大纲与世界观，生成长线主线与舞台路线图…");
   const messages = turns.map(chatMessageMarkup).join("");
-  const resetBtn = filesExist && !busy ? '<button id="reset-design-chat" class="chat-icon-btn" type="button" title="删除当前产物并重新开始">⟳ 重置</button>' : "";
+  const resetBtn = filesExist ? `<button id="reset-design-chat" class="chat-icon-btn" type="button" title="${busy ? "先结束当前生成任务，结束后即可删除已生成内容" : "删除当前阶段已生成内容并重新开始"}" ${busy ? "disabled" : ""}>${busy ? "结束任务后可删除" : "删除本阶段产物"}</button>` : "";
   const emptyHint = filesExist
     ? "已生成初版。继续输入修改要求，例如「主角金手指改为推演能力」「舞台1改为势力对抗」。"
     : (scope === "concept" ? "还没有内容。写下你的灵感，生成第一版粗略大纲与世界观。" : "还没有内容。写下对长线主线与舞台的设想，开始生成。");
@@ -1487,7 +1493,7 @@ function worldForm() {
   const sourceList = sources.length
     ? `<div class="world-uploaded">
         <div class="world-uploaded-heading"><span>已上传</span><strong>${sources.length} 份资料</strong></div>
-        <ul class="source-list">${sources.map((source) => `<li><strong>${escapeHtml(source.file_name)}</strong><span>${source.size ? `${Math.ceil(source.size / 1024).toLocaleString()} KB` : "已导入"}</span></li>`).join("")}</ul>
+        <ul class="source-list world-source-list">${sources.map((source) => `<li><strong>${escapeHtml(source.file_name)}</strong><span>${source.size ? `${Math.ceil(source.size / 1024).toLocaleString()} KB` : "已导入"}</span><button class="world-source-remove" data-world-source-id="${escapeHtml(source.id || "")}" data-world-source-name="${escapeHtml(source.file_name || "资料")}" type="button">移除</button></li>`).join("")}</ul>
       </div>`
     : '<p class="reference-file-status">尚未上传目标世界资料</p>';
   return `
@@ -1500,6 +1506,7 @@ function worldForm() {
     ${sources.length ? `<div class="world-enable-row">
       <label class="world-toggle"><input id="world-enabled" type="checkbox" ${wizardState.summary?.world_knowledge?.enabled === false ? "" : "checked"} /><span class="world-toggle-text">启用目标世界资料库</span></label>
       <small>${worldReady ? "资料库 7 个栏目已完整构建。关闭后后续设计不再注入资料；再次打开即恢复使用。" : "导入后会自动构建；若任务中断，可不上传新文件，直接点击下方按钮重试。"}</small>
+      ${Number(wizardState.summary?.world_knowledge?.generated_file_count || 0) > 0 ? '<button id="clear-world-generated" class="text-button world-clear-generated" type="button">清除已生成内容，保留原资料</button>' : ""}
     </div>` : ""}`;
 }
 
@@ -1781,6 +1788,33 @@ function bindWorldSource() {
         list.appendChild(item);
       });
       list.hidden = !files.length;
+    }
+  });
+  $$("[data-world-source-id]").forEach((button) => button.addEventListener("click", async () => {
+    const sourceId = button.dataset.worldSourceId || "";
+    const sourceName = button.dataset.worldSourceName || "资料";
+    if (!sourceId || !confirm(`移除目标世界资料“${sourceName}”？\n\n这会同时清除当前目标世界的已生成内容，其他原始资料会保留。`)) return;
+    button.disabled = true;
+    try {
+      await api(`/api/workspaces/${encodeURIComponent(wizardState.workspace)}/world-knowledge/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" });
+      await refreshWorkspaceArtifacts();
+      showToast(`已移除“${sourceName}”，并清理旧的目标世界生成内容。`);
+    } catch (error) {
+      showToast(error.message || "无法移除该资料。", true);
+      button.disabled = false;
+    }
+  }));
+  $("#clear-world-generated")?.addEventListener("click", async () => {
+    if (!confirm("清除目标世界已经生成的 cards、分栏、整合结果和审计文件？\n\n已上传的原始资料会保留，之后可以直接重新构建。")) return;
+    const button = $("#clear-world-generated");
+    button.disabled = true;
+    try {
+      const result = await api(`/api/workspaces/${encodeURIComponent(wizardState.workspace)}/world-knowledge/generated`, { method: "DELETE" });
+      await refreshWorkspaceArtifacts();
+      showToast(`已清除 ${Number(result.removed_file_count || 0)} 个目标世界生成文件，原始资料已保留。`);
+    } catch (error) {
+      showToast(error.message || "无法清除目标世界生成内容。", true);
+      button.disabled = false;
     }
   });
   $("#world-enabled")?.addEventListener("change", async (event) => {
@@ -2747,44 +2781,118 @@ function taskLabel(task) {
   return "等待";
 }
 
-function promptCardsMarkup(items, openLatest = false) {
-  if (!items?.length) return '<p class="drawer-prompt-empty">该任务尚未调用大模型。</p>';
-  return items.map((item, index) => {
-    const call = `第 ${index + 1} 次调用${item.model ? ` · ${escapeHtml(item.model)}` : ""}`;
-    const open = openLatest && index === items.length - 1 ? " open" : "";
-    return `<details class="drawer-prompt-card"${open}>
-      <summary><strong>${call}</strong><span>${escapeHtml(item.created_at || "")}</span></summary>
-      <pre>${escapeHtml(item.prompt || "")}</pre>
+function promptItemId(item, index) {
+  return String(item?.id || `${item?.created_at || "prompt"}-${item?.model || "model"}-${index}`);
+}
+
+function promptCardsMarkup(items, options = {}) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return '<p class="drawer-prompt-empty">该任务尚未调用大模型。</p>';
+  const openIds = options.openIds instanceof Set ? options.openIds : new Set();
+  const openLatest = Boolean(options.openLatest);
+  return list.map((item, index) => {
+    const id = promptItemId(item, index);
+    const promptText = String(item.prompt || "");
+    const label = String(item.label || "").trim();
+    const title = label && label !== "模型调用" ? label : `第 ${index + 1} 次模型调用`;
+    const meta = [item.model || "未标注模型", `${promptText.length} 字符`].join(" · ");
+    const open = openIds.has(id) || (openLatest && !openIds.size && index === list.length - 1) ? " open" : "";
+    return `<details class="drawer-prompt-card" data-prompt-id="${escapeHtml(id)}"${open}>
+      <summary><span class="drawer-prompt-title"><strong>${escapeHtml(title)}</strong><small>${escapeHtml(meta)}</small></span><span>${escapeHtml(item.created_at || "")}</span></summary>
+      <div class="drawer-prompt-card-actions"><span>调用 #${index + 1}</span><button type="button" data-copy-prompt-id="${escapeHtml(id)}">复制 Prompt</button></div>
+      <pre>${escapeHtml(promptText)}</pre>
     </details>`;
   }).join("");
 }
 
+function setCurrentPrompt(item, index = 0) {
+  wizardState.currentPromptText = item ? String(item.prompt || "") : "";
+  wizardState.currentPromptId = item ? promptItemId(item, index) : "";
+  const button = $("#copy-current-prompt");
+  if (button) {
+    button.disabled = !wizardState.currentPromptText;
+    button.textContent = wizardState.currentPromptText ? `复制当前 Prompt · #${index + 1}` : "复制当前 Prompt";
+  }
+}
+
+function bindPromptCards(container, items) {
+  if (!container) return;
+  const list = Array.isArray(items) ? items : [];
+  const itemMap = new Map(list.map((item, index) => [promptItemId(item, index), { item, index }]));
+  container.querySelectorAll('[data-copy-prompt-id]').forEach((button) => button.addEventListener("click", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const entry = itemMap.get(button.dataset.copyPromptId);
+    if (!entry) return;
+    const promptText = String(entry.item.prompt || "");
+    if (!promptText) return;
+    await navigator.clipboard.writeText(promptText);
+    setCurrentPrompt(entry.item, entry.index);
+    showToast(`第 ${entry.index + 1} 次 Prompt 已复制。`);
+  }));
+  container.querySelectorAll('.drawer-prompt-card[data-prompt-id]').forEach((details) => details.addEventListener("toggle", () => {
+    if (!details.open) return;
+    const entry = itemMap.get(details.dataset.promptId);
+    if (entry) setCurrentPrompt(entry.item, entry.index);
+  }));
+  const opened = [...container.querySelectorAll('.drawer-prompt-card[open][data-prompt-id]')].pop();
+  const selected = opened ? itemMap.get(opened.dataset.promptId) : null;
+  if (selected) setCurrentPrompt(selected.item, selected.index);
+}
+
+function promptListMarkup(items, totalCount, taskStatus) {
+  const list = Array.isArray(items) ? items : [];
+  const total = Number(totalCount ?? list.length);
+  const live = ["queued", "running", "stopping"].includes(taskStatus);
+  const countText = total > list.length ? `显示最近 ${list.length} / ${total} 次` : `${total} 次模型调用`;
+  return `<div class="drawer-prompt-overview"><span>${escapeHtml(countText)}</span><span class="${live ? "live" : ""}">${live ? "实时刷新" : "历史记录"}</span></div>`;
+}
+
 function setTaskView(view) {
   wizardState.taskView = view === "prompt" ? "prompt" : "log";
-  $$('[data-task-view]').forEach((button) => button.classList.toggle("active", button.dataset.taskView === wizardState.taskView));
+  $$('[data-task-view]').forEach((button) => {
+    const active = button.dataset.taskView === wizardState.taskView;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
   const promptView = wizardState.taskView === "prompt";
-  $("#drawer-log").hidden = promptView;
+  $("#drawer-log-shell").hidden = promptView;
   $("#drawer-prompts").hidden = !promptView;
   $$(".log-action").forEach((button) => { button.hidden = promptView; });
+  $$(".prompt-action").forEach((button) => { button.hidden = !promptView; });
   if (promptView) refreshTaskPrompts();
+  else if (wizardState.logFollow) setLogFollow(true, true);
 }
 
 async function refreshTaskPrompts() {
-  if (!wizardState.activeTaskId) return;
+  const taskId = wizardState.activeTaskId;
+  if (!taskId) return;
   try {
-    const data = await api(`/api/tasks/${wizardState.activeTaskId}/prompts`);
+    const data = await api(`/api/tasks/${taskId}/prompts`);
+    if (taskId !== wizardState.activeTaskId) return;
     const items = data.items || [];
-    $("#drawer-prompt-count").textContent = String(Number(data.task?.prompt_count ?? items.length));
-    $("#drawer-prompts").innerHTML = promptCardsMarkup(items, true);
+    const total = Number(data.task?.prompt_count ?? items.length);
+    $("#drawer-prompt-count").textContent = String(total);
+    const signature = `${taskId}|${total}|${data.task?.status || ""}|${items.map((item, index) => promptItemId(item, index)).join("|")}`;
+    if (wizardState.promptRenderKey === signature) return;
+    const container = $("#drawer-prompts");
+    const openIds = new Set([...container.querySelectorAll('.drawer-prompt-card[open][data-prompt-id]')].map((node) => node.dataset.promptId));
+    const previousScrollTop = container.scrollTop;
+    container.innerHTML = `${promptListMarkup(items, total, data.task?.status)}${promptCardsMarkup(items, { openIds, openLatest: openIds.size === 0 })}`;
+    bindPromptCards(container, items);
+    wizardState.promptRenderKey = signature;
+    if (openIds.size) container.scrollTop = previousScrollTop;
   } catch (_) { /* task may have been removed */ }
 }
 
 function openPromptDialog(items, meta = "模型调用") {
   const dialog = $("#prompt-dialog");
   const list = Array.isArray(items) ? items : [];
+  const container = $("#prompt-dialog-list");
   $("#prompt-dialog-meta").textContent = meta;
-  $("#prompt-dialog-list").innerHTML = promptCardsMarkup(list, true);
-  wizardState.currentPromptText = list.length ? String(list[list.length - 1].prompt || "") : "";
+  setCurrentPrompt(null);
+  container.innerHTML = promptCardsMarkup(list, { openLatest: true });
+  bindPromptCards(container, list);
   if (typeof dialog.showModal === "function") dialog.showModal();
 }
 
@@ -2804,33 +2912,87 @@ async function refreshTasks() {
   if (!wizardState.activeTaskId && tasks[0]) wizardState.activeTaskId = tasks[0].id;
   const activeTask = tasks.find((task) => task.id === wizardState.activeTaskId);
   $("#drawer-prompt-count").textContent = String(Number(activeTask?.prompt_count || 0));
+  $("#drawer-active-task-label").textContent = activeTask?.label || "请选择任务";
+  $("#drawer-active-task-message").textContent = activeTask?.message || (activeTask ? "任务状态已同步。" : "选择任务后查看执行状态、实时日志和模型 Prompt。");
+  const activeState = $("#drawer-active-task-state");
+  activeState.textContent = activeTask ? taskLabel(activeTask) : "空闲";
+  activeState.className = `task-state ${activeTask?.status || ""}`;
   const taskRunning = Boolean(activeTask && ["queued", "running", "stopping"].includes(activeTask.status));
   $("#stop-current-task").disabled = !taskRunning || activeTask.status === "stopping";
   $("#stop-current-task").textContent = activeTask?.status === "stopping" ? "正在停止" : "停止任务";
-  $("#delete-current-task").disabled = taskRunning;
+  $("#delete-current-task").disabled = !activeTask || taskRunning;
   $("#copy-current-log").disabled = !activeTask;
   $("#download-current-log").disabled = !activeTask;
   $("#drawer-tasks").innerHTML = tasks.length ? tasks.map((task) => `<button class="drawer-task ${task.id === wizardState.activeTaskId ? "active" : ""}" data-task="${task.id}" type="button"><span><span class="drawer-task-title">${escapeHtml(task.label)}</span><span class="drawer-task-meta">${escapeHtml(task.created_at || "")}</span></span><span class="task-state ${task.status}">${taskLabel(task)}</span></button>`).join("") : '<p class="review-empty">当前工作区还没有任务记录。</p>';
   $$('[data-task]').forEach((button) => button.addEventListener("click", () => {
+    if (wizardState.activeTaskId === button.dataset.task) return;
     wizardState.activeTaskId = button.dataset.task;
     wizardState.logOffset = 0;
+    wizardState.promptRenderKey = "";
+    setCurrentPrompt(null);
     $("#drawer-log").textContent = "";
-    refreshTasks().then(() => Promise.all([refreshLog(), refreshTaskPrompts()]));
+    $("#drawer-prompts").innerHTML = '<p class="drawer-prompt-empty">正在读取模型 Prompt…</p>';
+    setLogFollow(true, false);
+    refreshTasks().then(() => Promise.all([refreshLog(), wizardState.taskView === "prompt" ? refreshTaskPrompts() : Promise.resolve()]));
   }));
+}
+
+function isDrawerLogNearBottom() {
+  const log = $("#drawer-log");
+  return !log || (log.scrollHeight - log.scrollTop - log.clientHeight) < 36;
+}
+
+function updateLogFollowControls() {
+  const button = $("#toggle-log-follow");
+  if (button) {
+    button.textContent = wizardState.logFollow ? "跟随输出：开" : "跟随输出：关";
+    button.classList.toggle("active", wizardState.logFollow);
+  }
+  if (wizardState.logFollow) $("#drawer-log-new").hidden = true;
+}
+
+function setLogFollow(enabled, scrollToEnd = false) {
+  wizardState.logFollow = Boolean(enabled);
+  const log = $("#drawer-log");
+  if (wizardState.logFollow && scrollToEnd && log) log.scrollTop = log.scrollHeight;
+  updateLogFollowControls();
+}
+
+function appendDrawerLog(content) {
+  if (!content) return;
+  const log = $("#drawer-log");
+  if (!log) return;
+  log.textContent += content;
+  if (wizardState.logFollow) {
+    log.scrollTop = log.scrollHeight;
+    $("#drawer-log-new").hidden = true;
+  } else {
+    $("#drawer-log-new").hidden = false;
+  }
+}
+
+function handleDrawerLogScroll() {
+  const nearBottom = isDrawerLogNearBottom();
+  if (nearBottom !== wizardState.logFollow) {
+    wizardState.logFollow = nearBottom;
+    updateLogFollowControls();
+  }
 }
 
 async function refreshLog() {
   if (!wizardState.activeTaskId) return;
   try {
     const data = await api(`/api/tasks/${wizardState.activeTaskId}/logs?offset=${wizardState.logOffset}`);
-    if (data.content) {
-      const log = $("#drawer-log");
-      log.textContent += data.content;
-      log.scrollTop = log.scrollHeight;
-      wizardState.logOffset = data.next_offset;
-    }
+    appendDrawerLog(data.content || "");
+    wizardState.logOffset = data.next_offset;
     wizardState._tasks = wizardState._tasks?.map((item) => item.id === data.task.id ? data.task : item);
     $("#drawer-prompt-count").textContent = String(Number(data.task.prompt_count || 0));
+    if (data.task.id === wizardState.activeTaskId) {
+      $("#drawer-active-task-message").textContent = data.task.message || "任务状态已同步。";
+      const state = $("#drawer-active-task-state");
+      state.textContent = taskLabel(data.task);
+      state.className = `task-state ${data.task.status || ""}`;
+    }
     if (["succeeded", "succeeded_with_warnings", "failed", "stopped"].includes(data.task.status) && wizardState.lastSyncedTaskId !== data.task.id) {
       wizardState.lastSyncedTaskId = data.task.id;
       await refreshTasks();
@@ -3028,11 +3190,15 @@ async function boot() {
     $("#close-settings").addEventListener("click", closeSettings);
     $("#settings-scrim").addEventListener("click", closeSettings);
     $$('[data-task-view]').forEach((button) => button.addEventListener("click", () => setTaskView(button.dataset.taskView)));
+    $("#toggle-log-follow").addEventListener("click", () => setLogFollow(!wizardState.logFollow, !wizardState.logFollow));
+    $("#drawer-log-new").addEventListener("click", () => setLogFollow(true, true));
+    $("#drawer-log").addEventListener("scroll", handleDrawerLogScroll, { passive: true });
+    updateLogFollowControls();
     $("#close-prompt-dialog").addEventListener("click", () => $("#prompt-dialog").close());
     $("#copy-current-prompt").addEventListener("click", async () => {
       if (!wizardState.currentPromptText) return;
       await navigator.clipboard.writeText(wizardState.currentPromptText);
-      showToast("Prompt 已复制。");
+      showToast("当前 Prompt 已复制。");
     });
     $("#copy-current-log").addEventListener("click", async () => {
       if (!wizardState.activeTaskId) return;

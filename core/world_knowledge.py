@@ -276,6 +276,75 @@ def import_world_sources(ws, paths, force=False):
     }
 
 
+def clear_world_knowledge_generated(ws):
+    """删除目标世界派生结果，保留 imports 原始资料和 manifest。"""
+    removed_files = 0
+    removed_paths = []
+    for directory in (_cards_dir(ws), _partials_dir(ws), _worlds_dir(ws), _audits_dir(ws)):
+        if not os.path.isdir(directory):
+            continue
+        removed_files += sum(1 for root, _, files in os.walk(directory) for _ in files)
+        shutil.rmtree(directory)
+        removed_paths.append(os.path.relpath(directory, _world_root(ws)).replace("\\", "/"))
+
+    for item_path in (_canon_index_path(ws), os.path.join(_world_root(ws), "world_knowledge.md")):
+        if not os.path.isfile(item_path):
+            continue
+        os.remove(item_path)
+        removed_files += 1
+        removed_paths.append(os.path.relpath(item_path, _world_root(ws)).replace("\\", "/"))
+
+    manifest = _load_manifest(ws)
+    sources = manifest.get("sources", []) if isinstance(manifest.get("sources"), list) else []
+    return {
+        "cleared": True,
+        "removed_file_count": removed_files,
+        "removed_paths": removed_paths,
+        "source_count": sum(1 for item in sources if isinstance(item, dict)),
+    }
+
+
+def remove_world_source(ws, source_id):
+    """移除一份已导入资料，并清除依赖它的全部派生世界知识结果。"""
+    source_id = str(source_id or "").strip()
+    if not source_id:
+        raise ValueError("目标世界资料 ID 不能为空。")
+
+    manifest = _load_manifest(ws)
+    sources = manifest.get("sources", []) if isinstance(manifest.get("sources"), list) else []
+    matches = [item for item in sources if isinstance(item, dict) and str(item.get("id") or "") == source_id]
+    if len(matches) != 1:
+        raise ValueError("目标世界资料不存在或已经被移除。")
+    target = matches[0]
+
+    imported_path = str(target.get("imported_path") or "").strip()
+    if imported_path:
+        imports_root = os.path.realpath(_imports_dir(ws))
+        candidate = os.path.realpath(imported_path)
+        try:
+            inside_imports = os.path.commonpath([imports_root, candidate]) == imports_root
+        except ValueError:
+            inside_imports = False
+        if not inside_imports:
+            raise ValueError("目标世界资料路径异常，已拒绝删除。")
+        if os.path.isfile(candidate):
+            os.remove(candidate)
+
+    manifest["sources"] = [
+        item for item in sources
+        if not (isinstance(item, dict) and str(item.get("id") or "") == source_id)
+    ]
+    _save_manifest(ws, manifest)
+    cleanup = clear_world_knowledge_generated(ws)
+    return {
+        "removed": True,
+        "source_id": source_id,
+        "file_name": str(target.get("file_name") or ""),
+        "remaining_source_count": len(manifest["sources"]),
+        "generated_cleanup": cleanup,
+    }
+
+
 # ── 文本切分 ──
 
 def _split_text(text, chunk_size):

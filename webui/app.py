@@ -222,6 +222,18 @@ class WebRuntime:
                 for key in keys:
                     values.pop(key, None)
 
+    def workspace_has_active_work(self, workspace: str) -> bool:
+        workspace = require_workspace_name(workspace)
+        if any(
+            task["status"] in {"queued", "running", "stopping"}
+            for task in self.tasks.list(workspace)
+        ):
+            return True
+        return any(
+            self._chat_manager_busy(manager, workspace)
+            for manager in (self.design_chat, self.arcs_chat, self.chapters_chat, self.draft_chat)
+        )
+
     def has_active_work(self) -> bool:
         if any(task["status"] in {"queued", "running", "stopping"} for task in self.tasks.list()):
             return True
@@ -472,6 +484,28 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
             from core.world_knowledge import set_world_knowledge_enabled as _set
             final = _set(ws, enabled)
             return {"ok": True, "enabled": final}
+        except Exception as exc:
+            raise _http_error(exc) from exc
+
+    @app.delete("/api/workspaces/{name}/world-knowledge/generated")
+    def clear_world_knowledge_generated(name: str) -> dict[str, Any]:
+        try:
+            runtime.store.summary(name)
+            if runtime.workspace_has_active_work(name):
+                raise ValueError("该工作区仍有生成任务正在执行或暂停，请先结束任务再清理目标世界产物。")
+            from core.world_knowledge import clear_world_knowledge_generated as _clear
+            return _clear(init_workspace(name))
+        except Exception as exc:
+            raise _http_error(exc) from exc
+
+    @app.delete("/api/workspaces/{name}/world-knowledge/sources/{source_id}")
+    def remove_world_knowledge_source(name: str, source_id: str) -> dict[str, Any]:
+        try:
+            runtime.store.summary(name)
+            if runtime.workspace_has_active_work(name):
+                raise ValueError("该工作区仍有生成任务正在执行或暂停，请先结束任务再移除目标世界资料。")
+            from core.world_knowledge import remove_world_source as _remove
+            return _remove(init_workspace(name), source_id)
         except Exception as exc:
             raise _http_error(exc) from exc
 

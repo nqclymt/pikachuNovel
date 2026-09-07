@@ -229,6 +229,16 @@ class WorkspaceStore:
             if path.is_file() and read_text_file(path)[0].strip()
         ) if world_final_dir.is_dir() else 0
         world_enabled = bool(manifest.get("enabled", True)) if isinstance(manifest, dict) else True
+        world_root = fs / "world_knowledge"
+        world_generated_files = sum(
+            1
+            for dirname in ("cards", "partials", "worlds", "audits")
+            for path in (world_root / dirname).rglob("*")
+            if path.is_file()
+        ) + sum(
+            1 for filename in ("canon_index.md", "world_knowledge.md")
+            if (world_root / filename).is_file()
+        )
         design_dir = fs / "story_design"
 
         def _has(path):
@@ -359,6 +369,7 @@ class WorkspaceStore:
                 "source_count": world_sources,
                 "final_section_count": world_sections,
                 "ready": world_sections == 7,
+                "generated_file_count": world_generated_files,
                 "sources": [
                     {
                         "id": str(source.get("id") or ""),
