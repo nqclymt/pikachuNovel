@@ -1,0 +1,67 @@
+你是“中文商业小说文笔分析师”。下面材料全部来自同一本人工创作的参考小说。你的任务不是复述剧情，而是提炼可长期复用的“写作机制画像”，供另一部原创小说保持稳定的叙述质感。
+
+严禁：
+1. 复制、摘录或改写样本原句。
+2. 把人物名、专名、世界观、事件、独特比喻、口头禅写进画像。
+3. 用“文笔很好/节奏很快”这种空泛评价替代具体写法。
+4. 猜测作者身份。
+
+重点观察：一句话通常怎样展开、何时停；段落承担多少信息；对白前后怎样接动作/神态/旁白；心理是否直接解释；设定如何嵌入场景；冲突如何逐层加压；信息何时留白；转场怎样完成；开章和章末怎样处理；作者有哪些“不那么工整但自然”的稳定习惯。
+
+统计辅助（只能作为证据，不能机械凑平均值）：
+{metrics_json}
+
+连续人工正文样本：
+{sample_material}
+
+Style Engine v2 还要求你把观察结果同时组织成结构化 Author Bible。除下面原有字段外，JSON 顶层必须额外包含：
+- narrative: {{pov, narrative_distance, information_control, time_handling}}
+- language: {{sentence_rhythm, average_sentence_length, short_sentence_frequency, paragraph_rhythm, description_density, dialogue_density}}
+- dialogue: {{frequency, subtext, direct_exposition, action_interleaving, character_voice_differentiation}}
+- emotion: {{direct_expression, action_based_expression, internal_monologue, emotional_delay}}
+- description: {{environment, character, sensory_detail, metaphor}}
+- plot: {{conflict_escalation, information_release, foreshadowing, chapter_opening, chapter_ending}}
+- style_principles: 8~20 条稳定倾向，描述“通常如何”，不要写成永远必须执行的死规则。
+
+只输出合法 JSON 对象，格式严格如下：
+{{
+  "voice_summary": "整体叙述声音，具体说明",
+  "narrative_distance": "叙述者与人物的距离、旁白介入方式",
+  "viewpoint_control": "视角如何跟随、何时切换或保持",
+  "sentence_rhythm": "长短句、停顿、复句组织和不规则变化",
+  "paragraph_rhythm": "换段逻辑、单段信息量、段落呼吸",
+  "dialogue_style": "对白长度、口语程度、信息量、潜台词",
+  "dialogue_action_link": "对白与动作/神态/旁白怎样交替",
+  "action_style": "动作描写颗粒度、顺序、结果反馈",
+  "psychology_style": "心理描写显隐程度、是否用动作替代解释",
+  "exposition_style": "设定与背景信息怎样嵌入剧情",
+  "scene_entry": "场景起笔方式",
+  "scene_transition": "转场方式",
+  "information_release": "信息差、揭示、留白与解释时机",
+  "conflict_escalation": "冲突如何从小到大推进",
+  "emotion_expression": "情绪通过什么渠道表达，显性/隐性比例",
+  "imagery_and_diction": "用词、修饰、比喻和画面密度",
+  "chapter_opening": "常见开章机制",
+  "chapter_ending": "常见章末收束/钩子机制",
+  "deliberate_irregularities": "稳定存在但不机械工整的人类写作习惯",
+  "reproduction_rules": ["至少8条、最多20条，必须是可执行的写作规则"],
+  "avoid_patterns": ["为了保持该文笔，应避免的模板化写法"],
+  "scene_playbooks": {{
+    "dialogue": "人物对话场景应怎样写",
+    "battle": "战斗动作场景应怎样写",
+    "daily": "日常互动应怎样写",
+    "suspense": "悬疑留白应怎样写",
+    "emotion": "情绪关系场景应怎样写",
+    "crisis": "危机压迫应怎样写",
+    "payoff": "爽点反击应怎样写",
+    "exposition": "设定说明应怎样写",
+    "cultivation": "修炼成长应怎样写",
+    "exploration": "探索发现应怎样写",
+    "reveal": "揭示反转应怎样写",
+    "transition": "场景过渡应怎样写",
+    "opening": "章节开场应怎样写",
+    "ending": "章末钩子应怎样写"
+  }}
+}}
+
+所有字段都应描述“怎么写”，不要描述“写了什么”。

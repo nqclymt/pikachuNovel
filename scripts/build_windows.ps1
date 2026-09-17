@@ -27,6 +27,9 @@ if ($Clean) {
 
 New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
 & $PythonExecutable -m PyInstaller --noconfirm --distpath $OutputPath --workpath $WorkPath $SpecPath
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed with exit code $LASTEXITCODE; an older EXE is not a successful build."
+}
 
 $Executable = Join-Path $OutputPath "PikachuNovel.exe"
 if (-not (Test-Path -LiteralPath $Executable)) {

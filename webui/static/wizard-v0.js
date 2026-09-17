@@ -12,6 +12,7 @@ const CONFIG_PREFIXES = {
   data_builder: "DATA_BUILDER",
   adaptive_builder: "ADAPTIVE_BUILDER",
   adaptive_builder_lite: "ADAPTIVE_BUILDER_LITE",
+  humanize_builder: "HUMANIZE_BUILDER",
 };
 
 const REVIEW_GROUPS = {
@@ -65,8 +66,11 @@ const wizardState = {
   draftChatArc: null,
   draftJobCompleted: {},
   draftJobIds: {},
+  draftChatHumanize: true,
+  draftChatHumanizeStrength: "standard",
   referenceFile: null,
   referenceScope: "all",
+  referenceLibrary: [],
   mechanicsMode: "auto",
   mechanicsFile: null,
   lastSyncedTaskId: null,
@@ -103,9 +107,10 @@ function closeSettings() {
 
 function modelConfigFields(groupId, group) {
   const prefix = CONFIG_PREFIXES[groupId];
-  const configured = group.api_key_configured ? "API Key 已配置" : "未配置 API Key";
+  const inherited = groupId === "humanize_builder" && !group.api_key_configured && !group.model && !group.base_url;
+  const configured = inherited ? "沿用正文模型" : group.api_key_configured ? "API Key 已配置" : "未配置 API Key";
   return `<section class="model-config-group">
-    <header><h3>${escapeHtml(group.label)}</h3><span class="config-status ${group.api_key_configured ? "ready" : "missing"}">${configured}</span></header>
+    <header><h3>${escapeHtml(group.label)}</h3><span class="config-status ${group.api_key_configured || inherited ? "ready" : "missing"}">${configured}</span></header>
     <label>模型名称<input name="${prefix}_MODEL" value="${escapeHtml(group.model || "")}" placeholder="例如：deepseek-v4-pro" autocomplete="off" /></label>
     <label>Base URL<input name="${prefix}_BASE_URL" value="${escapeHtml(group.base_url || "")}" placeholder="https://api.example.com" autocomplete="off" /></label>
     <label>调用协议<select name="${prefix}_WIRE_API">
@@ -493,7 +498,9 @@ function referenceStatus() {
   const total = Number(reference.total_chapter_count || 0);
   const hasExisting = Boolean(reference.has_sample);
   const isComplete = hasExisting && Boolean(reference.is_complete);
-  return { ...reference, processed, stagedChapters, total, hasExisting, isComplete };
+  const structureComplete = !hasExisting || Boolean(reference.structure_complete);
+  const needsStructureResume = hasExisting && isComplete && !structureComplete;
+  return { ...reference, processed, stagedChapters, total, hasExisting, isComplete, structureComplete, needsStructureResume };
 }
 
 function referenceScopeControls(defaultTarget, disabled = false) {
@@ -504,6 +511,24 @@ function referenceScopeControls(defaultTarget, disabled = false) {
       <label class="reference-scope-option"><input name="reference-scope" value="prefix" type="radio" ${wizardState.referenceScope === "prefix" ? "checked" : ""} /><span>只拆前</span><input id="reference-max-chapters" type="number" min="1" value="${defaultTarget}" ${wizardState.referenceScope === "prefix" && !disabled ? "" : "disabled"} /><span>章</span></label>
     </div>
   </fieldset>`;
+}
+
+function referenceLibraryMarkup(hasExisting = false) {
+  const items = Array.isArray(wizardState.referenceLibrary) ? wizardState.referenceLibrary : [];
+  if (!items.length) {
+    return `<section class="reference-library"><div class="reference-library-heading"><strong>复用已拆解小说</strong><small>当前没有其它已完成拆解的参考小说。</small></div></section>`;
+  }
+  const options = items.map((item) => {
+    const sourceName = String(item.source_name || "sample_novel.txt").replace(/^[0-9a-f]{16}_/i, "");
+    const chapters = Number(item.chapter_count || item.total_chapter_count || 0);
+    const status = item.is_complete ? "完整拆解" : "可续拆";
+    return `<option value="${escapeHtml(item.workspace)}">${escapeHtml(sourceName)} · ${escapeHtml(item.workspace)} · ${chapters} 章 · ${status}</option>`;
+  }).join("");
+  return `<section class="reference-library">
+    <div class="reference-library-heading"><strong>复用已拆解小说</strong><small>直接复制已有拆解资产，不会再次调用模型。</small></div>
+    <div class="reference-library-row"><select id="reference-library-select">${options}</select><button id="apply-reference-library" class="secondary-button" type="button">应用到当前作品</button></div>
+    ${hasExisting ? '<small class="reference-library-warning">应用后会替换当前参考小说及拆解结果；后续已经生成的设计内容不会自动删除。</small>' : ""}
+  </section>`;
 }
 
 function designStatus() {
@@ -600,8 +625,9 @@ function arcsChatPanelMarkup(volume, conversation, job = null) {
     <div class="chat-scroll" id="chat-message-list">${messages || `<div class="chat-empty"><div class="chat-empty-icon">📖</div><p>${emptyHint}</p></div>`}</div>
     ${arcsJobMarkup(job)}
     <div class="chat-composer">
+      ${WorkflowPromptPresets.markup("arcs", busy || job?.status === "queued")}
       <div class="chat-input-row">
-        <textarea id="arcs-chat-input" class="chat-input" placeholder="${placeholder}" rows="1"></textarea>
+        <textarea id="arcs-chat-input" class="chat-input" placeholder="${placeholder}" rows="1" ${busy || job?.status === "queued" ? "disabled" : ""}></textarea>
         <button id="send-arcs-chat" class="chat-send-btn" type="button" title="发送（Ctrl/⌘+Enter）"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
       </div>
       <div class="chat-composer-meta">${resetBtn}</div>
@@ -613,6 +639,7 @@ function renderArcsChat(volume, conversation, job = null) {
   const node = $("#arcs-chat-host");
   if (!node) return;
   node.innerHTML = arcsChatPanelMarkup(volume, conversation, job);
+  bindWorkflowPromptPresets(node, "#arcs-chat-input");
   const list = $("#chat-message-list");
   if (list) list.scrollTop = list.scrollHeight;
   $("#arcs-volume-select")?.addEventListener("change", () => {
@@ -721,10 +748,10 @@ function pollArcsJob(volume) {
 async function sendArcsMessage(volume) {
   const input = $("#arcs-chat-input");
   const message = (input?.value || "").trim();
-  if (!message) return;
+  if (!message || input?.disabled) return;
   const button = $("#send-arcs-chat");
   if (button) button.disabled = true;
-  if (input) input.disabled = true;
+  WorkflowPromptPresets.setBusy(input, true);
   const list = $("#chat-message-list");
   const empty = list?.querySelector(".chat-empty");
   if (empty) empty.remove();
@@ -740,12 +767,13 @@ async function sendArcsMessage(volume) {
     list.appendChild(typing);
     list.scrollTop = list.scrollHeight;
   }
-  if (input) input.value = "";
   let started = false;
   try {
     const job = await api(`/api/workspaces/${encodeURIComponent(wizardState.workspace)}/arcs/${volume}/chat`, {
       method: "POST", body: JSON.stringify({ message }),
     });
+    started = true;
+    if (input) input.value = "";
     wizardState.arcsJobCompleted[volume] = Number(job.completed || 0);
     $("#chat-typing")?.remove();
     const conversation = await api(`/api/workspaces/${encodeURIComponent(wizardState.workspace)}/arcs/${volume}/conversation`);
@@ -753,8 +781,13 @@ async function sendArcsMessage(volume) {
     pollArcsJob(volume);
   } catch (error) {
     showToast(error.message || "生成失败，请重试。", true);
-    loadArcsChat(volume);
-  } finally {}
+    if (started) loadArcsChat(volume);
+    else {
+      $("#chat-typing")?.remove();
+      WorkflowPromptPresets.setBusy(input, false);
+      if (button) button.disabled = false;
+    }
+  }
 }
 
 
@@ -838,8 +871,9 @@ function chaptersChatPanelMarkup(volume, arcIdx, conversation, job = null) {
     <div class="chat-scroll" id="chat-message-list">${messages || `<div class="chat-empty"><div class="chat-empty-icon">📝</div><p>${emptyHint}</p></div>`}</div>
     ${chaptersJobMarkup(job)}
     <div class="chat-composer">
+      ${WorkflowPromptPresets.markup("chapters", busy || job?.status === "queued" || !arcs.length)}
       <div class="chat-input-row">
-        <textarea id="chapters-chat-input" class="chat-input" placeholder="${placeholder}" rows="1"></textarea>
+        <textarea id="chapters-chat-input" class="chat-input" placeholder="${placeholder}" rows="1" ${busy || job?.status === "queued" || !arcs.length ? "disabled" : ""}></textarea>
         <button id="send-chapters-chat" class="chat-send-btn" type="button" title="发送（Ctrl/⌘+Enter）" ${arcs.length ? "" : "disabled"}><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
       </div>
       <div class="chat-composer-meta">${resetBtn}</div>
@@ -851,6 +885,7 @@ function renderChaptersChat(volume, arcIdx, conversation, job = null) {
   const node = $("#chapters-chat-host");
   if (!node) return;
   node.innerHTML = chaptersChatPanelMarkup(volume, arcIdx, conversation, job);
+  bindWorkflowPromptPresets(node, "#chapters-chat-input");
   const list = $("#chat-message-list");
   if (list) list.scrollTop = list.scrollHeight;
   $("#chapters-volume-select")?.addEventListener("change", () => {
@@ -986,10 +1021,10 @@ function pollChaptersJob(volume, arcIdx) {
 async function sendChaptersMessage(volume, arcIdx) {
   const input = $("#chapters-chat-input");
   const message = (input?.value || "").trim();
-  if (!message) return;
+  if (!message || !arcIdx || input?.disabled) return;
   const button = $("#send-chapters-chat");
   if (button) button.disabled = true;
-  if (input) input.disabled = true;
+  WorkflowPromptPresets.setBusy(input, true);
   const list = $("#chat-message-list");
   const empty = list?.querySelector(".chat-empty");
   if (empty) empty.remove();
@@ -1005,11 +1040,13 @@ async function sendChaptersMessage(volume, arcIdx) {
     list.appendChild(typing);
     list.scrollTop = list.scrollHeight;
   }
-  if (input) input.value = "";
+  let started = false;
   try {
     const job = await api(`/api/workspaces/${encodeURIComponent(wizardState.workspace)}/chapters/${volume}/${arcIdx}/chat`, {
       method: "POST", body: JSON.stringify({ message }),
     });
+    started = true;
+    if (input) input.value = "";
     wizardState.chaptersJobCompleted[`${volume}:${arcIdx}`] = Number(job.completed || 0);
     $("#chat-typing")?.remove();
     const conversation = await api(`/api/workspaces/${encodeURIComponent(wizardState.workspace)}/chapters/${volume}/${arcIdx}/conversation`);
@@ -1017,16 +1054,26 @@ async function sendChaptersMessage(volume, arcIdx) {
     pollChaptersJob(volume, arcIdx);
   } catch (error) {
     showToast(error.message || "生成失败，请重试。", true);
-    loadChaptersChat(volume, arcIdx);
-  } finally {}
+    if (started) loadChaptersChat(volume, arcIdx);
+    else {
+      $("#chat-typing")?.remove();
+      WorkflowPromptPresets.setBusy(input, false);
+      if (button) button.disabled = false;
+    }
+  }
 }
 
 function draftJobMarkup(job) {
   if (!job) return "";
-  if (job.status === "idle" && job.can_resume) {
-    return `<div class="chat-job-progress is-interrupted" id="draft-job-progress"><div class="chat-job-progress-main"><span class="chat-job-status-dot"></span><div class="chat-job-progress-copy"><strong>上次生成在第 ${Number(job.next_chapter)} 章前中断</strong><span>已保留 ${Number(job.completed || 0)} / ${Number(job.total || 0)} 章正文</span></div><button id="continue-draft-job" class="chat-job-action resume continue" type="button">▶ 继续生成</button></div></div>`;
+  if ((job.status === "idle" && job.can_resume) || job.status === "interrupted") {
+    const next = Number(job.next_chapter || 0);
+    const detail = job.status === "interrupted" ? (job.error || "程序或本地服务在任务完成前退出。") : `已保留 ${Number(job.completed || 0)} / ${Number(job.total || 0)} 章正文`;
+    return `<div class="chat-job-progress is-interrupted" id="draft-job-progress"><div class="chat-job-progress-main"><span class="chat-job-status-dot"></span><div class="chat-job-progress-copy"><strong>${next ? `上次生成在第 ${next} 章前中断` : "上次正文任务意外中断"}</strong><span>${escapeHtml(detail)}</span></div>${job.can_resume ? '<button id="continue-draft-job" class="chat-job-action resume continue" type="button">▶ 继续生成</button>' : ""}</div></div>`;
   }
-  if (["idle", "completed", "failed", "stopped"].includes(job.status)) return "";
+  if (job.status === "failed") {
+    return `<div class="chat-job-progress is-failed" id="draft-job-progress"><div class="chat-job-progress-main"><span class="chat-job-status-dot"></span><div class="chat-job-progress-copy"><strong>正文生成失败</strong><span>${escapeHtml(job.error || job.message || "未知错误")}</span></div>${job.can_resume ? '<button id="continue-draft-job" class="chat-job-action resume continue" type="button">▶ 从断点继续</button>' : ""}</div></div>`;
+  }
+  if (["idle", "completed", "stopped"].includes(job.status)) return "";
   const total = Number(job.total || 0), completed = Number(job.completed || 0);
   const paused = job.status === "paused", stopping = job.status === "stopping";
   const routing = job.progress_kind === "serial_draft_refine" && job.phase === "routing";
@@ -1035,32 +1082,63 @@ function draftJobMarkup(job) {
   return `<div class="chat-job-progress ${paused ? "is-paused" : ""} ${routing ? "is-refining" : ""}" id="draft-job-progress"><div class="chat-job-progress-main"><span class="chat-job-status-dot"></span><div class="chat-job-progress-copy"><strong>${escapeHtml(job.message || "正在生成正文")}</strong><span>${routing ? "正在判断最早受影响章节" : `${completed} / ${total || "—"} 章`}</span></div><div class="chat-job-actions">${promptAction}${pause}<button id="stop-draft-job" class="chat-job-action stop" type="button" ${stopping ? "disabled" : ""}>■ ${stopping ? "结束中" : "结束"}</button></div></div><div class="chat-job-progress-track"><i style="width:${total ? Math.round(completed * 100 / total) : 3}%"></i></div></div>`;
 }
 
+const DRAFT_PROMPT_PRESETS = [
+  { label: "正常生成", text: "按照章纲正常生成，保持参考小说的叙事节奏和文风。" },
+  { label: "加强爽感", text: "节奏快一点，冲突更直接，爽点提前，不要拖沓。" },
+  { label: "加强人物", text: "加强人物对话和临场反应，减少旁白解释，让人物更鲜活。" },
+  { label: "自然叙述", text: "减少模板化短句和总结句，保持自然叙述，不要每个动作都解释心理。" },
+  { label: "战斗章节", text: "战斗过程写清楚，动作连贯，少用空泛形容，多写实际招式、位置变化和结果。" },
+  { label: "日常章节", text: "增加生活细节和人物互动，节奏放松一些，但不要水。" },
+  { label: "悬疑章节", text: "保留信息差，不要提前解释答案，章末加强钩子。" },
+  { label: "保留剧情优化", text: "保留现有剧情，只优化对话和节奏，不要重写核心事件。" },
+];
+
+function draftPromptPresetsMarkup(disabled = false) {
+  return WorkflowPromptPresets.markup("draft", disabled, DRAFT_PROMPT_PRESETS);
+}
+
+function bindWorkflowPromptPresets(host, inputSelector, items = null) {
+  WorkflowPromptPresets.bind(host?.querySelector("[data-workflow-presets]"), host?.querySelector(inputSelector), items);
+}
+
 function draftChatPanelMarkup(volume, arcIdx, conversation, job = null) {
   const volumes = wizardState.summary?.volumes || [];
   const detail = volumes.find((item) => Number(item.volume) === Number(volume)) || { arcs: [] };
   const arcs = detail.arcs || [], turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
   const guide = conversation?.writing_guide || {};
+  const anchorStatus = guide.human_style_library
+    ? `Style Engine v2 · 索引修订 ${Number(guide.human_style_pipeline_revision || 0)} · ${Number(guide.human_style_scene_example_count || guide.human_style_sample_count || 0)} 个场景案例 · ${guide.human_style_needs_rebuild ? "生成前将升级旧索引" : "已启用；规划成功/兜底请查看本次日志"}`
+    : (guide.reference_anchor
+      ? (guide.reference_anchor_aligned ? "人工文笔库：未建立 · 暂用同卷进度章节锚点" : "人工文笔库：未建立 · 暂用全书风格指纹")
+      : "人工参考风格：未启用");
   const busy = Boolean(job && ["running", "pausing", "paused", "stopping"].includes(job.status));
   const resetBtn = (turns.length || conversation?.has_drafts)
     ? `<button id="reset-draft-chat" class="chat-icon-btn" type="button" title="${busy ? "先结束当前生成任务，结束后即可删除已生成正文" : "删除当前情节单元的全部正文并重新开始"}" ${busy ? "disabled" : ""}>${busy ? "结束任务后可删除" : "删除本批正文"}</button>`
     : "";
   const volumeSelector = `<select id="draft-chat-volume">${volumes.map((item) => `<option value="${item.volume}" ${Number(volume) === Number(item.volume) ? "selected" : ""}>第 ${item.volume} 舞台 / 卷</option>`).join("")}</select>`;
   const arcSelector = arcs.length ? `<select id="draft-chat-arc">${arcs.map((arc) => `<option value="${arc.idx}" ${Number(arcIdx) === Number(arc.idx) ? "selected" : ""}>情节单元${arc.idx}${arc.title ? ` · ${escapeHtml(arc.title)}` : ""}（第${arc.start_ch}-${arc.end_ch}章）</option>`).join("")}</select>` : '<select id="draft-chat-arc" disabled><option>该舞台暂无故事情节</option></select>';
+  const guideMode = guide.human_style_library
+    ? (guide.custom ? "Style Engine v2 + 自定义显式约束" : "语言风格由 Style Engine v2 控制；默认规范不覆盖文风")
+    : (guide.custom ? "当前使用自定义规范" : "当前使用项目默认 system_prompt.md");
   return `<section class="chat-panel draft-chat-panel"><header class="chat-panel-bar"><span class="chat-panel-bar-label">舞台 / 卷号</span>${volumeSelector}<span class="chat-panel-bar-label">故事情节</span>${arcSelector}</header>
-    <div class="writing-guide-bar"><div><strong>生文规范</strong><span>${guide.custom ? "当前使用自定义规范" : "当前使用项目默认 system_prompt.md"}</span></div><div class="writing-guide-actions"><input id="draft-guide-file" type="file" accept=".txt,.md" hidden><button id="upload-draft-guide" class="chat-icon-btn" type="button">上传规范</button>${guide.custom ? '<button id="reset-draft-guide" class="chat-icon-btn" type="button">恢复默认</button>' : ""}</div></div>
+    <div class="writing-guide-bar"><div><strong>生文规范</strong><span>${guideMode}</span><span class="reference-anchor-status ${guide.human_style_library || guide.reference_anchor ? "ready" : "missing"}">${anchorStatus}</span></div><div class="writing-guide-actions"><input id="draft-guide-file" type="file" accept=".txt,.md" hidden><button id="upload-draft-guide" class="chat-icon-btn" type="button">上传规范</button>${guide.custom ? '<button id="reset-draft-guide" class="chat-icon-btn" type="button">恢复默认</button>' : ""}</div></div>
     <div class="chat-scroll" id="chat-message-list">${turns.map(chatMessageMarkup).join("") || `<div class="chat-empty"><div class="chat-empty-icon">✍</div><p>${arcs.length ? "输入本情节正文的生成要求，开始逐章串行创作。" : "请先生成故事情节和逐章章纲。"}</p></div>`}</div>${draftJobMarkup(job)}
-    <div class="chat-composer"><div class="chat-input-row"><textarea id="draft-chat-input" class="chat-input" rows="1" placeholder="输入正文生成或调整要求"></textarea><button id="send-draft-chat" class="chat-send-btn" type="button" title="发送（Ctrl/⌘+Enter）" aria-label="发送" ${arcs.length ? "" : "disabled"}><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button></div><div class="chat-composer-meta draft-chat-options"><label class="draft-humanize-option"><input id="draft-chat-humanize" type="checkbox" ${wizardState.draftChatHumanize === false ? "" : "checked"} /><span>生成后自动去 AI 味精修</span></label>${resetBtn}</div></div></section>`;
+    <div class="chat-composer">${draftPromptPresetsMarkup(busy || job?.status === "queued" || !arcs.length)}<div class="chat-input-row"><textarea id="draft-chat-input" class="chat-input" rows="1" placeholder="输入正文生成或调整要求，也可以点上方快捷要求" ${busy || job?.status === "queued" || !arcs.length ? "disabled" : ""}></textarea><button id="send-draft-chat" class="chat-send-btn" type="button" title="发送（Ctrl/⌘+Enter）" aria-label="发送" ${arcs.length ? "" : "disabled"}><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button></div><div class="chat-composer-meta draft-chat-options"><label class="draft-humanize-option"><input id="draft-chat-humanize" type="checkbox" ${wizardState.draftChatHumanize === false ? "" : "checked"} /><span>生成后局部精修${guide.human_style_library ? "（沿用人工文笔库）" : ""}</span></label><label class="draft-humanize-strength"><span>强度</span><select id="draft-chat-humanize-strength" ${wizardState.draftChatHumanize === false ? "disabled" : ""}><option value="light" ${wizardState.draftChatHumanizeStrength === "light" ? "selected" : ""}>轻度</option><option value="standard" ${!wizardState.draftChatHumanizeStrength || wizardState.draftChatHumanizeStrength === "standard" ? "selected" : ""}>标准</option><option value="deep" ${wizardState.draftChatHumanizeStrength === "deep" ? "selected" : ""}>深度</option></select></label>${resetBtn}</div></div></section>`;
 }
 
 function renderDraftChat(volume, arcIdx, conversation, job = null) {
   const host = $("#draft-chat-host"); if (!host) return;
   host.innerHTML = draftChatPanelMarkup(volume, arcIdx, conversation, job);
   const active = job && ["running", "pausing", "paused", "stopping"].includes(job.status);
-  if (active) ["#draft-chat-volume", "#draft-chat-arc", "#draft-chat-input", "#draft-chat-humanize", "#send-draft-chat"].forEach((s) => { if ($(s)) $(s).disabled = true; });
+  if (active) ["#draft-chat-volume", "#draft-chat-arc", "#draft-chat-input", "#draft-chat-humanize", "#draft-chat-humanize-strength", "#send-draft-chat"].forEach((s) => { if ($(s)) $(s).disabled = true; });
   $("#draft-chat-volume")?.addEventListener("change", () => { wizardState.draftChatVolume = Number($("#draft-chat-volume").value); const d = (wizardState.summary?.volumes || []).find((v) => Number(v.volume) === wizardState.draftChatVolume); wizardState.draftChatArc = d?.arcs?.[0]?.idx || null; loadDraftChat(wizardState.draftChatVolume, wizardState.draftChatArc); });
   $("#draft-chat-arc")?.addEventListener("change", () => { wizardState.draftChatArc = Number($("#draft-chat-arc").value); loadDraftChat(volume, wizardState.draftChatArc); });
   $("#send-draft-chat")?.addEventListener("click", () => sendDraftMessage(volume, arcIdx));
-  $("#draft-chat-humanize")?.addEventListener("change", () => { wizardState.draftChatHumanize = Boolean($("#draft-chat-humanize")?.checked); });
+  bindWorkflowPromptPresets(host, "#draft-chat-input", DRAFT_PROMPT_PRESETS);
+  const draftInput = $("#draft-chat-input");
+  draftInput?.addEventListener("input", () => { draftInput.style.height = "auto"; draftInput.style.height = Math.min(draftInput.scrollHeight, 160) + "px"; });
+  $("#draft-chat-humanize")?.addEventListener("change", () => { wizardState.draftChatHumanize = Boolean($("#draft-chat-humanize")?.checked); if ($("#draft-chat-humanize-strength")) $("#draft-chat-humanize-strength").disabled = !wizardState.draftChatHumanize; });
+  $("#draft-chat-humanize-strength")?.addEventListener("change", () => { wizardState.draftChatHumanizeStrength = $("#draft-chat-humanize-strength")?.value || "standard"; });
   $("#draft-chat-input")?.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendDraftMessage(volume, arcIdx); } });
   for (const action of ["pause", "resume", "stop", "continue"]) $(`#${action}-draft-job`)?.addEventListener("click", () => controlDraftJob(volume, arcIdx, action));
   $("#upload-draft-guide")?.addEventListener("click", () => $("#draft-guide-file")?.click());
@@ -1095,6 +1173,7 @@ function renderDraftChat(volume, arcIdx, conversation, job = null) {
 }
 
 let draftJobPollTimer = null;
+let draftJobPollFailures = 0;
 async function loadDraftChat(volume, arcIdx) {
   if (!arcIdx) {
     try {
@@ -1106,15 +1185,42 @@ async function loadDraftChat(volume, arcIdx) {
   try { const base = `/api/workspaces/${encodeURIComponent(wizardState.workspace)}/drafts/${volume}/${arcIdx}`; const [conversation, job] = await Promise.all([api(`${base}/conversation`), api(`${base}/job`)]); renderDraftChat(volume, arcIdx, conversation, job); if (["running", "pausing", "paused", "stopping"].includes(job.status)) pollDraftJob(volume, arcIdx); } catch (e) { showToast(e.message || "无法加载正文对话。", true); }
 }
 async function sendDraftMessage(volume, arcIdx) {
-  const message = ($("#draft-chat-input")?.value || "").trim(); if (!message) return;
-  try { const base = `/api/workspaces/${encodeURIComponent(wizardState.workspace)}/drafts/${volume}/${arcIdx}`; const humanize = $("#draft-chat-humanize")?.checked !== false; wizardState.draftChatHumanize = humanize; const job = await api(`${base}/chat`, { method: "POST", body: JSON.stringify({ message, humanize }) }); const key = `${volume}:${arcIdx}`; wizardState.draftJobCompleted[key] = 0; wizardState.draftJobIds[key] = job.id || ""; renderDraftChat(volume, arcIdx, await api(`${base}/conversation`), job); pollDraftJob(volume, arcIdx); } catch (e) { showToast(e.message || "无法开始正文生成。", true); }
+  const input = $("#draft-chat-input");
+  const message = (input?.value || "").trim();
+  if (!message || !arcIdx || input?.disabled) return;
+  const button = $("#send-draft-chat");
+  WorkflowPromptPresets.setBusy(input, true);
+  if (button) button.disabled = true;
+  let started = false;
+  try {
+    const base = `/api/workspaces/${encodeURIComponent(wizardState.workspace)}/drafts/${volume}/${arcIdx}`;
+    const humanize = $("#draft-chat-humanize")?.checked !== false;
+    const humanizeStrength = $("#draft-chat-humanize-strength")?.value || wizardState.draftChatHumanizeStrength || "standard";
+    wizardState.draftChatHumanize = humanize;
+    wizardState.draftChatHumanizeStrength = humanizeStrength;
+    const job = await api(`${base}/chat`, { method: "POST", body: JSON.stringify({ message, humanize, humanize_strength: humanizeStrength }) });
+    started = true;
+    input.value = "";
+    const key = `${volume}:${arcIdx}`;
+    wizardState.draftJobCompleted[key] = 0;
+    wizardState.draftJobIds[key] = job.id || "";
+    renderDraftChat(volume, arcIdx, await api(`${base}/conversation`), job);
+    pollDraftJob(volume, arcIdx);
+  } catch (error) {
+    showToast(error.message || "无法开始正文生成。", true);
+    if (started) loadDraftChat(volume, arcIdx);
+    else {
+      WorkflowPromptPresets.setBusy(input, false);
+      if (button) button.disabled = false;
+    }
+  }
 }
 async function controlDraftJob(volume, arcIdx, action) {
   try { const base = `/api/workspaces/${encodeURIComponent(wizardState.workspace)}/drafts/${volume}/${arcIdx}`; const job = await api(`${base}/${action}`, { method: "POST", body: JSON.stringify({}) }); renderDraftChat(volume, arcIdx, await api(`${base}/conversation`), job); pollDraftJob(volume, arcIdx); } catch (e) { showToast(e.message || "无法控制正文任务。", true); }
 }
 function pollDraftJob(volume, arcIdx) {
   if (draftJobPollTimer) clearTimeout(draftJobPollTimer);
-  const poll = async () => { if (Number(wizardState.draftChatVolume) !== Number(volume) || Number(wizardState.draftChatArc) !== Number(arcIdx)) return; const base = `/api/workspaces/${encodeURIComponent(wizardState.workspace)}/drafts/${volume}/${arcIdx}`; try { const job = await api(`${base}/job`); if (["running", "pausing", "paused", "stopping"].includes(job.status)) { const key = `${volume}:${arcIdx}`, jobId = job.id || "", done = Number(job.completed || 0); if (jobId && wizardState.draftJobIds[key] !== jobId) { wizardState.draftJobIds[key] = jobId; wizardState.draftJobCompleted[key] = 0; } if (done > Number(wizardState.draftJobCompleted[key] || 0)) { wizardState.draftJobCompleted[key] = done; const refining = job.progress_kind === "serial_draft_refine"; await refreshReviewArtifactsOnly(refining, "draft", !refining); } const progress = $("#draft-job-progress"); if (progress) { const holder = document.createElement("div"); holder.innerHTML = draftJobMarkup(job); progress.replaceWith(holder.firstElementChild); for (const action of ["pause", "resume", "stop"]) $(`#${action}-draft-job`)?.addEventListener("click", () => controlDraftJob(volume, arcIdx, action)); } else { renderDraftChat(volume, arcIdx, await api(`${base}/conversation`), job); } draftJobPollTimer = setTimeout(poll, 1000); return; } await refreshWorkspaceArtifacts(); renderDraftChat(volume, arcIdx, await api(`${base}/conversation`), job); if (job.status === "failed") showToast(job.error || "正文生成失败。", true); else if (job.status === "stopped") showToast("已结束本轮正文生成。"); else if (job.status === "completed") showToast("正文生成完成。"); } catch (_) { draftJobPollTimer = setTimeout(poll, 1500); } }; poll();
+  const poll = async () => { if (Number(wizardState.draftChatVolume) !== Number(volume) || Number(wizardState.draftChatArc) !== Number(arcIdx)) return; const base = `/api/workspaces/${encodeURIComponent(wizardState.workspace)}/drafts/${volume}/${arcIdx}`; try { const job = await api(`${base}/job`); draftJobPollFailures = 0; if (["running", "pausing", "paused", "stopping"].includes(job.status)) { const key = `${volume}:${arcIdx}`, jobId = job.id || "", done = Number(job.completed || 0); if (jobId && wizardState.draftJobIds[key] !== jobId) { wizardState.draftJobIds[key] = jobId; wizardState.draftJobCompleted[key] = 0; } if (done > Number(wizardState.draftJobCompleted[key] || 0)) { wizardState.draftJobCompleted[key] = done; const refining = job.progress_kind === "serial_draft_refine"; await refreshReviewArtifactsOnly(refining, "draft", !refining); } const progress = $("#draft-job-progress"); if (progress) { const holder = document.createElement("div"); holder.innerHTML = draftJobMarkup(job); progress.replaceWith(holder.firstElementChild); for (const action of ["pause", "resume", "stop"]) $(`#${action}-draft-job`)?.addEventListener("click", () => controlDraftJob(volume, arcIdx, action)); } else { renderDraftChat(volume, arcIdx, await api(`${base}/conversation`), job); } draftJobPollTimer = setTimeout(poll, 1000); return; } await refreshWorkspaceArtifacts(); renderDraftChat(volume, arcIdx, await api(`${base}/conversation`), job); if (job.status === "failed") showToast(job.error || "正文生成失败。", true); else if (job.status === "stopped") showToast("已结束本轮正文生成。"); else if (job.status === "completed") showToast("正文生成完成。"); } catch (error) { draftJobPollFailures += 1; if (draftJobPollFailures === 3) { const progress = $("#draft-job-progress"); if (progress) progress.outerHTML = `<div class="chat-job-progress is-interrupted" id="draft-job-progress"><div class="chat-job-progress-main"><span class="chat-job-status-dot"></span><div class="chat-job-progress-copy"><strong>正文任务连接中断</strong><span>无法读取后端任务状态，程序重开后可检查断点并继续。</span></div></div></div>`; showToast("正文任务连接中断，当前状态无法读取。", true); } draftJobPollTimer = setTimeout(poll, 1500); } }; poll();
 }
 
 function chatArtifactCards(artifacts) {
@@ -1203,13 +1309,14 @@ function designChatPanelMarkup(scope, conversation, job = null) {
     ? "已生成初版。继续输入修改要求，例如「主角金手指改为推演能力」「舞台1改为势力对抗」。"
     : (scope === "concept" ? "还没有内容。写下你的灵感，生成第一版粗略大纲与世界观。" : "还没有内容。写下对长线主线与舞台的设想，开始生成。");
   const unusedReference = Number(sd.unused_reference_chapter_count || 0);
-  const referenceOption = scope === "concept" && filesExist && unusedReference > 0
+  const structureMismatch = Boolean(sd.reference_structure_mismatch);
+  const referenceOption = scope === "concept" && filesExist && (unusedReference > 0 || structureMismatch)
     ? `<label class="chat-reference-option">
         <input id="use-new-reference" type="checkbox" />
         <span class="chat-reference-switch" aria-hidden="true"><i></i></span>
         <span class="chat-reference-copy">
-          <span><strong>同步新增拆解到阶段粗纲</strong><b>${unusedReference} 章待处理</b></span>
-          <small>只调整最后一个阶段，或在参考小说新增分卷时追加阶段</small>
+          <span><strong>${structureMismatch ? "按新参考分卷重建阶段粗纲" : "同步新增拆解到阶段粗纲"}</strong><b>${structureMismatch ? `${Number(sd.stage_outline_count || 0)} 阶段 → ${Number(sd.reference_volume_count || 0)} 阶段` : `${unusedReference} 章待处理`}</b></span>
+          <small>${structureMismatch ? "参考分卷结构已变化，将从阶段1开始按每个参考卷重新生成阶段粗纲" : "只调整最后一个阶段"}</small>
         </span>
       </label>`
     : "";
@@ -1230,6 +1337,7 @@ function designChatPanelMarkup(scope, conversation, job = null) {
     <div class="chat-scroll" id="chat-message-list">${messages || `<div class="chat-empty"><div class="chat-empty-icon">💬</div><p>${emptyHint}</p></div>`}</div>
     ${designJobMarkup(job)}
     <div class="chat-composer">
+      ${WorkflowPromptPresets.markup(scope, busy)}
       <div class="chat-attachments" id="chat-attachments"></div>
       <div class="chat-input-row">
         <button class="chat-attach-button" id="chat-attach" type="button" title="加载文件作为参考" aria-label="加载文件" ${busy ? "disabled" : ""}><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
@@ -1290,6 +1398,7 @@ function renderDesignChat(scope, conversation, job = null) {
   const node = $("#design-chat-host");
   if (!node) return;
   node.innerHTML = designChatPanelMarkup(scope, conversation, job);
+  bindWorkflowPromptPresets(node, "#chat-input");
   const list = $("#chat-message-list");
   if (list) list.scrollTop = list.scrollHeight;
   renderChatAttachments(scope);
@@ -1403,6 +1512,7 @@ function pollDesignJob(scope) {
 
 async function sendDesignMessage(scope) {
   const input = $("#chat-input");
+  if (input?.disabled) return;
   const message = (input?.value || "").trim();
   const attachments = chatAttachments(scope).map((item) => ({ name: item.name, content: item.content }));
   const useNewReference = Boolean($("#use-new-reference")?.checked);
@@ -1412,7 +1522,7 @@ async function sendDesignMessage(scope) {
   const attachButton = $("#chat-attach");
   if (button) button.disabled = true;
   if (attachButton) attachButton.disabled = true;
-  if (input) input.disabled = true;
+  WorkflowPromptPresets.setBusy(input, true);
   const list = $("#chat-message-list");
   const empty = list?.querySelector(".chat-empty");
   if (empty) empty.remove();
@@ -1429,7 +1539,7 @@ async function sendDesignMessage(scope) {
     list.appendChild(typing);
     list.scrollTop = list.scrollHeight;
   }
-  if (input) input.value = "";
+  let started = false;
   try {
     const job = await api(`/api/workspaces/${encodeURIComponent(wizardState.workspace)}/design/${scope}/chat`, {
       method: "POST", body: JSON.stringify({
@@ -1439,13 +1549,14 @@ async function sendDesignMessage(scope) {
         sync_updated_design: syncUpdatedDesign,
       }),
     });
+    started = true;
+    if (input) input.value = "";
     wizardState.chatAttachments[scope] = [];
     $("#chat-typing")?.remove();
     wizardState.designJobCompleted[scope] = 0;
     const composer = $("#design-chat .chat-composer");
     composer?.insertAdjacentHTML("beforebegin", designJobMarkup(job));
     bindDesignJobControls(scope);
-    started = true;
     pollDesignJob(scope);
   } catch (error) {
     const message = error.message || "生成失败，请重试。";
@@ -1460,7 +1571,7 @@ async function sendDesignMessage(scope) {
     if (!started) {
       if (button) button.disabled = false;
       if (attachButton) attachButton.disabled = false;
-      if (input) input.disabled = false;
+      WorkflowPromptPresets.setBusy(input, false);
     }
   }
 }
@@ -1613,6 +1724,15 @@ function formForStep(step) {
       const defaultTarget = reference.total || Math.max(reference.processed, reference.stagedChapters, 200);
       const currentFile = escapeHtml((reference.source_name || "sample_novel.txt").replace(/^[0-9a-f]{16}_/i, ""));
       const selectedFile = wizardState.referenceFile;
+      const styleReady = Boolean(reference.style_library_ready);
+      const styleProfileReady = Boolean(reference.style_profile_ready);
+      const styleSamples = Number(reference.style_scene_example_count || reference.style_sample_count || 0);
+      const styleChapters = Number(reference.style_library_chapter_count || 0);
+      const styleEngine = reference.style_engine || "";
+      const styleDetail = styleReady
+        ? `${styleSamples} 个连续人工场景案例 · 覆盖 ${styleChapters} 章 · 索引修订 ${Number(reference.style_pipeline_revision || 0)}${reference.style_needs_rebuild ? "（需要升级）" : ""} · ${styleProfileReady ? "Author Bible 已完成" : "仅样本/统计可用，Author Bible 待补充"} · 场景边界与标签为规则分析，非逐场景人工校对`
+        : "构建 Scene 级案例库、Author Bible 和多维检索；不会重做剧情拆解。";
+      const styleLibraryMarkup = `<section class="reference-style-library ${styleReady ? "ready" : "missing"}"><div><span class="reference-style-badge">${styleEngine === "scene_style_engine_v2" ? "Style Engine v2" : "人工文笔库"}</span><strong>${styleReady ? "已建立" : "尚未建立"}</strong><small>${styleDetail}</small></div><button id="build-reference-style-library" class="secondary-button" type="button">${styleReady ? (styleProfileReady ? "重新构建 Style Engine" : "补充 Author Bible") : "构建 Style Engine v2"}</button></section>`;
       return `
         <div class="reference-source reference-existing" id="reference-source">
           <div class="reference-current-file">
@@ -1625,12 +1745,18 @@ function formForStep(step) {
             <input id="reference-file-input" type="file" accept=".txt,text/plain" />
             <small id="reference-file-help">${selectedFile ? "系统会匹配已拆章节，只拆解新增部分。" : "系统会自动跳过已拆章节，并重新检查末尾故事片段。"}</small>
           </label>
-          <p id="reference-file-status" class="reference-file-status">${selectedFile ? `新文件：${escapeHtml(selectedFile.name)}（${Math.ceil(selectedFile.size / 1024).toLocaleString()} KB）` : (reference.isComplete ? "尚未选择新文件" : "无需重新上传，可直接重试尚未完成的拆解步骤")}</p>
+          <p id="reference-file-status" class="reference-file-status">${selectedFile ? `新文件：${escapeHtml(selectedFile.name)}（${Math.ceil(selectedFile.size / 1024).toLocaleString()} KB）` : (reference.needsStructureResume ? "基础拆解已完成，智能分卷待收尾，可直接继续" : (reference.isComplete ? "尚未选择新文件" : "无需重新上传，可直接重试尚未完成的拆解步骤"))}</p>
           ${referenceScopeControls(defaultTarget, reference.isComplete && !selectedFile)}
+          ${styleLibraryMarkup}
           <label class="reference-rebuild-option">
             <input id="reference-rebuild" type="checkbox" />
             <span><strong>清除已有拆解结果并重新拆解</strong><small>用于参考源文件已变化或旧版拆解状态。会删除单章事实卡、故事片段和参考小说结构，不会删除已上传的参考小说源文件。</small></span>
           </label>
+          <div class="reference-maintenance-actions">
+            <button id="clear-reference-analysis" class="secondary-button danger-soft" type="button">仅清除拆解结果</button>
+            <small>保留当前参考小说 TXT，不自动重新拆解。</small>
+          </div>
+          ${referenceLibraryMarkup(true)}
         </div>`;
     }
     const selectedFile = wizardState.referenceFile;
@@ -1638,8 +1764,9 @@ function formForStep(step) {
     <fieldset class="reference-source" id="reference-source">
       <legend>参考小说</legend>
       <label class="reference-file-picker ${selectedFile ? "selected" : ""}" id="reference-file-picker" for="reference-file-input"><span id="reference-file-label">${selectedFile ? "已选择参考小说" : "导入小说内容"}</span><input id="reference-file-input" type="file" accept=".txt,text/plain" /><small id="reference-file-help">支持 TXT 文件。后台会检测编码，非 UTF-8 文本会自动转换后再拆解。</small></label>
-      <p id="reference-file-status" class="reference-file-status">${selectedFile ? `已选择：${escapeHtml(selectedFile.name)}（${Math.ceil(selectedFile.size / 1024).toLocaleString()} KB），请设置拆解范围。` : "先选择小说文件，再设置拆解范围。"}</p>
+      <p id="reference-file-status" class="reference-file-status">${selectedFile ? `已选择：${escapeHtml(selectedFile.name)}（${Math.ceil(selectedFile.size / 1024).toLocaleString()} KB），请设置拆解范围。` : "可以上传新小说，也可以直接复用下面已有的拆解结果。"}</p>
       ${referenceScopeControls(200, !selectedFile)}
+      ${referenceLibraryMarkup(false)}
     </fieldset>`;
   }
   if (step.id === "world") return worldForm();
@@ -1724,10 +1851,10 @@ function bindReferenceSource() {
     if (scope) scope.disabled = !rebuild && !file && reference.isComplete;
     if (maxInput) maxInput.disabled = wizardState.referenceScope !== "prefix" || (!rebuild && !file);
     if (!action) return;
-    action.disabled = !rebuild && !file && reference.isComplete;
+    action.disabled = !rebuild && !file && reference.isComplete && !reference.needsStructureResume;
     action.textContent = rebuild
       ? "清除并重新拆解"
-      : (!file && hasExisting && !reference.isComplete ? "重试未完成步骤" : "导入并开始拆解");
+      : (!file && reference.needsStructureResume ? "继续智能分卷" : (!file && hasExisting && !reference.isComplete ? "重试未完成步骤" : "导入并开始拆解"));
   };
   fileInput?.addEventListener("change", () => {
     wizardState.referenceFile = fileInput.files?.[0] || null;
@@ -1749,7 +1876,7 @@ function bindReferenceSource() {
     if (status) status.textContent = file
       ? `已选择：${file.name}（${Math.ceil(file.size / 1024).toLocaleString()} KB），请设置本次拆解范围。`
       : (hasExisting
-        ? (referenceStatus().isComplete ? "尚未选择新文件。" : "无需重新上传，可直接重试尚未完成的拆解步骤。")
+        ? (referenceStatus().needsStructureResume ? "基础拆解已完成，可直接继续智能分卷。" : (referenceStatus().isComplete ? "尚未选择新文件。" : "无需重新上传，可直接重试尚未完成的拆解步骤。"))
         : "先选择小说文件，再设置拆解范围。");
     updateAction();
     const maxInput = $("#reference-max-chapters");
@@ -1763,6 +1890,66 @@ function bindReferenceSource() {
     if (input.value === "prefix") maxInput.focus();
   }));
   rebuildInput?.addEventListener("change", updateAction);
+  $("#apply-reference-library")?.addEventListener("click", async () => {
+    const sourceWorkspace = $("#reference-library-select")?.value || "";
+    if (!sourceWorkspace) return;
+    const current = referenceStatus();
+    const warning = current.hasExisting
+      ? `应用“${sourceWorkspace}”中的已拆解参考小说？\n\n当前参考小说及拆解结果会被替换；后续已生成的全书设计、故事情节、章纲和正文不会自动删除。`
+      : `直接应用“${sourceWorkspace}”中已经完成的参考小说拆解？\n\n此操作不会调用模型，也不需要重新拆解。`;
+    if (!window.confirm(warning)) return;
+    const button = $("#apply-reference-library");
+    button.disabled = true;
+    try {
+      const result = await api(`/api/workspaces/${encodeURIComponent(wizardState.workspace)}/reference-analysis/apply`, {
+        method: "POST",
+        body: JSON.stringify({ source_workspace: sourceWorkspace }),
+      });
+      wizardState.referenceFile = null;
+      wizardState.selectedFile = null;
+      await refreshWorkspaceArtifacts();
+      showToast(result.is_complete
+        ? `已复用“${result.source_name || sourceWorkspace}”的完整参考拆解，共 ${Number(result.chapter_count || 0)} 章。`
+        : `已复用“${result.source_name || sourceWorkspace}”的已有拆解，共 ${Number(result.chapter_count || 0)} 章；可继续补齐剩余拆解。`);
+    } catch (error) {
+      showToast(error.message || "无法应用历史拆解结果。", true);
+      button.disabled = false;
+    }
+  });
+  $("#build-reference-style-library")?.addEventListener("click", async () => {
+    const reference = referenceStatus();
+    const ready = Boolean(reference.style_library_ready);
+    const profileReady = Boolean(reference.style_profile_ready);
+    if (ready && !window.confirm(`${profileReady ? "重新提炼人工文笔库" : "补充高级作者画像"}？\n\n连续人工样本库已经可用于正文；这一步只做增强，不会重做故事片段、分卷、全书设计、章纲或正文。`)) return;
+    const button = $("#build-reference-style-library");
+    if (button) button.disabled = true;
+    try {
+      const force = ready && profileReady;
+      await startTask(
+        "reference_style",
+        { force },
+        ready ? (profileReady ? "已开始重新提炼人工文笔库。" : "已开始补充高级作者画像，不重建连续样本。") : "已开始构建人工文笔库。"
+      );
+    } catch (error) {
+      if (button) button.disabled = false;
+      showToast(error.message || "无法开始人工文笔库提炼。", true);
+    }
+  });
+  $("#clear-reference-analysis")?.addEventListener("click", async () => {
+    if (!window.confirm("仅清除当前参考小说的拆解结果？\n\n会删除章节拆分、单章事实卡、人工文笔库、故事片段、全书/卷结构和拆解状态；参考小说 TXT 会保留，不会自动重新拆解。")) return;
+    const button = $("#clear-reference-analysis");
+    button.disabled = true;
+    try {
+      const result = await api(`/api/workspaces/${encodeURIComponent(wizardState.workspace)}/reference-analysis`, { method: "DELETE" });
+      wizardState.referenceFile = null;
+      wizardState.selectedFile = null;
+      await refreshWorkspaceArtifacts();
+      showToast(`已清除 ${Number(result.removed_file_count || 0)} 个参考拆解文件，参考小说源文件已保留。`);
+    } catch (error) {
+      showToast(error.message || "无法清除参考拆解结果。", true);
+      button.disabled = false;
+    }
+  });
 }
 
 function bindWorldSource() {
@@ -1985,7 +2172,7 @@ async function submitReferenceStep() {
   if (!wizardState.workspace) throw new Error("请先选择工作区。");
   const reference = referenceStatus();
   const rebuild = Boolean($("#reference-rebuild")?.checked);
-  if (reference.isComplete && !wizardState.referenceFile && !rebuild) return;
+  if (reference.isComplete && !reference.needsStructureResume && !wizardState.referenceFile && !rebuild) return;
   if (rebuild && !window.confirm("重新拆解会清除已有的单章事实卡、故事片段和参考小说结构，并从头生成。已上传的参考小说源文件会保留。是否继续？")) return;
   const scope = $('input[name="reference-scope"]:checked')?.value || "all";
   const args = {};
@@ -2309,16 +2496,18 @@ function renderActiveStep() {
   const reference = step.id === "reference" ? referenceStatus() : null;
   const referenceActionDisabled = Boolean(
     reference && (
-      (reference.isComplete && !wizardState.referenceFile)
+      (reference.isComplete && !reference.needsStructureResume && !wizardState.referenceFile)
       || (!reference.hasExisting && !wizardState.referenceFile)
     ),
   );
   const design = (step.id === "design" || step.id === "stage") ? designStatus() : null;
   const hidePrimaryAction = step.id === "design" || step.id === "arcs" || step.id === "chapters" || (step.id === "stage" && !Boolean(wizardState.summary?.story_design?.stage_ready));
   const actionLabel = step.id === "reference"
-    ? (reference?.hasExisting && !reference?.isComplete && !wizardState.referenceFile
-      ? "重试未完成步骤"
-      : "导入并开始拆解")
+    ? (reference?.needsStructureResume && !wizardState.referenceFile
+      ? "继续智能分卷"
+      : (reference?.hasExisting && !reference?.isComplete && !wizardState.referenceFile
+        ? "重试未完成步骤"
+        : "导入并开始拆解"))
     : step.id === "design"
       ? (design?.concept_ready ? "重新生成粗略大纲与世界观" : "生成粗略大纲与世界观")
       : step.id === "stage"
@@ -2621,11 +2810,15 @@ function renderReviewDocument(artifact) {
   if (!documentNode || !wizardState.selectedFile) return;
   const path = wizardState.selectedFile;
   const readonlyReference = isReferenceAsset(path);
-  const copyDraftButton = (
+  const isDraftChapter = (
     wizardState.activeStep === "draft"
-    && path.includes("/chapters/")
+    && path.startsWith("file_system/chapters/")
+    && path.toLowerCase().endsWith(".md")
     && !wizardState.fileEditing
-  ) ? '<button id="copy-draft-preview" class="secondary-button copy-preview-button" type="button">一键复制</button>' : "";
+  );
+  const draftFileButtons = isDraftChapter
+    ? '<button id="copy-draft-preview" class="secondary-button copy-preview-button" type="button">一键复制</button><button id="export-draft-preview" class="secondary-button" type="button">导出章节</button><button id="reveal-draft-preview" class="secondary-button" type="button">定位文件</button>'
+    : "";
   const finalizationTarget = chapterFinalizationTarget(path);
   const finalizationRecord = chapterFinalizationRecord(path);
   const finalized = Boolean(finalizationRecord?.finalized);
@@ -2638,7 +2831,7 @@ function renderReviewDocument(artifact) {
       ? ""
       : wizardState.fileEditing
         ? '<div class="preview-tools"><button id="cancel-file-edit" class="secondary-button" type="button">取消</button><button id="save-file-edit" class="primary-button" type="button">保存修改</button></div>'
-        : `<div class="preview-tools">${copyDraftButton}${finalizationButton}<button id="edit-review-file" class="secondary-button" type="button">编辑此文件</button></div>`;
+        : `<div class="preview-tools">${draftFileButtons}${finalizationButton}<button id="edit-review-file" class="secondary-button" type="button">编辑此文件</button></div>`;
   const panelPreview = !wizardState.fileEditing && isSystemPanelSnapshot(path)
     ? systemPanelPreview(wizardState.selectedFileContent)
     : null;
@@ -2680,6 +2873,31 @@ function renderReviewDocument(artifact) {
     } catch (error) {
       button.disabled = false;
       showToast(error.message || "复制失败，请手动选择正文复制。", true);
+    }
+  });
+  $("#export-draft-preview")?.addEventListener("click", () => {
+    const href = `/api/workspaces/${encodeURIComponent(wizardState.workspace)}/chapter/export?path=${encodeURIComponent(path)}`;
+    const link = document.createElement("a");
+    link.href = href;
+    link.download = path.split("/").pop() || "chapter.md";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    showToast("已开始导出当前章节。");
+  });
+  $("#reveal-draft-preview")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      await api(`/api/workspaces/${encodeURIComponent(wizardState.workspace)}/chapter/reveal`, {
+        method: "POST",
+        body: JSON.stringify({ path }),
+      });
+      showToast("已在资源管理器中定位当前章节文件。");
+    } catch (error) {
+      showToast(error.message || "无法定位章节文件。", true);
+    } finally {
+      button.disabled = false;
     }
   });
   $("#edit-review-file")?.addEventListener("click", () => {
@@ -3151,11 +3369,17 @@ async function selectWorkspace(name) {
   if (!name) {
     wizardState.summary = null;
     wizardState.fileTree = [];
+    wizardState.referenceLibrary = [];
     wizardState.activeStep = "reference";
   } else {
-    const [summary, tree] = await Promise.all([api(`/api/workspaces/${encodeURIComponent(name)}`), api(`/api/workspaces/${encodeURIComponent(name)}/tree`)]);
+    const [summary, tree, referenceLibrary] = await Promise.all([
+      api(`/api/workspaces/${encodeURIComponent(name)}`),
+      api(`/api/workspaces/${encodeURIComponent(name)}/tree`),
+      api(`/api/reference-library?current=${encodeURIComponent(name)}`),
+    ]);
     wizardState.summary = summary;
     wizardState.fileTree = tree.items;
+    wizardState.referenceLibrary = referenceLibrary.items || [];
     wizardState.activeStep = currentRecommendedStep();
   }
   renderRail();

@@ -36,6 +36,18 @@ from training.reference_finder import (
     load_reference_novel_outline,
     load_reference_volume_outline,
 )
+from training.outline_builder import load_chapter_text
+from training.human_style_library import (
+    build_human_style_library,
+    format_human_style_context,
+    human_style_library_status,
+    load_human_style_profile,
+    retrieve_human_style_context,
+)
+from training.style_engine_v2 import (
+    build_scene_style_context,
+    plan_chapter_scenes,
+)
 
 BATCH_SIZE = 20
 STORY_ARC_FILE_RE = re.compile(r'^arc_(\d+)_ch(\d+)_(\d+)\.md$')
@@ -108,6 +120,466 @@ def _get_lite_llm():
         print("错误：未检测到 API Key。")
         return None
     return LLMProvider(**config)
+
+
+def _get_humanize_llm():
+    """Use a dedicated naturalization model when configured; otherwise inherit the drafting model."""
+    human = ConfigLoader.get_humanize_builder_config()
+    lite = ConfigLoader.get_adaptive_builder_lite_config()
+    explicitly_configured = any(human.get(key) for key in ("model", "base_url", "api_key"))
+    if not explicitly_configured:
+        config = dict(lite)
+    else:
+        config = dict(lite)
+        for key in ("model", "base_url", "api_key", "wire_api"):
+            if human.get(key):
+                config[key] = human[key]
+    if not config.get("api_key"):
+        config["api_key"] = os.getenv("OPENAI_API_KEY")
+    if not config.get("api_key"):
+        print("Error: no API key configured for chapter naturalization.")
+        return None
+    return LLMProvider(**config)
+
+
+def _sample_reference_style_text(ws, max_chars=320000, windows=8):
+    """Sample the reference novel across the whole book without feeding large verbatim excerpts to the model."""
+    text = _read_file(ws.reference_sample) or ""
+    if len(text) <= max_chars:
+        return text
+    window = max(4000, max_chars // windows)
+    max_start = max(0, len(text) - window)
+    starts = [round(max_start * i / max(1, windows - 1)) for i in range(windows)]
+    return "\n\n".join(text[start:start + window] for start in starts)
+
+
+def _prose_style_metrics(text):
+    clean = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    clean = re.sub(
+        r"(?m)^\s*(?:#{1,6}\s*)?\u7b2c[^\n]{0,40}[\u7ae0\u56de\u8282][^\n]*\n?",
+        "", clean,
+    )
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", clean) if p.strip()]
+    sentence_texts = []
+    for paragraph in paragraphs:
+        sentence_texts.extend(
+            part.strip()
+            for part in re.split(r"(?<=[\u3002\uFF01\uFF1F!?])", paragraph)
+            if part.strip()
+        )
+    sentence_lengths = [len(re.sub(r"\s+", "", item)) for item in sentence_texts if item]
+    paragraph_lengths = [len(re.sub(r"\s+", "", item)) for item in paragraphs]
+
+    def stats(values):
+        if not values:
+            return 0.0, 0.0
+        avg = sum(values) / len(values)
+        variance = sum((value - avg) ** 2 for value in values) / len(values)
+        return avg, math.sqrt(variance)
+
+    sentence_avg, sentence_std = stats(sentence_lengths)
+    paragraph_avg, paragraph_std = stats(paragraph_lengths)
+    compact = re.sub(r"\s+", "", clean)
+    dialogue_chars = sum(len(m.group(0)) for m in re.finditer(r"[\u201c\u300c\u300e][^\u201d\u300d\u300f]{1,500}[\u201d\u300d\u300f]", compact))
+    total_chars = max(1, len(compact))
+    sentence_total = max(1, len(sentence_lengths))
+    punctuation_marks = ("\uFF0C", "\u3002", "\uFF1F", "?", "\uFF01", "!", "\uFF1B", "\uFF1A")
+    punctuation_total = max(1, sum(compact.count(mark) for mark in punctuation_marks))
+    return {
+        "sentence_count": len(sentence_lengths),
+        "paragraph_count": len(paragraph_lengths),
+        "sentence_avg": round(sentence_avg, 2),
+        "sentence_std": round(sentence_std, 2),
+        "short_sentence_ratio": round(sum(1 for n in sentence_lengths if n <= 12) / sentence_total, 4),
+        "long_sentence_ratio": round(sum(1 for n in sentence_lengths if n >= 30) / sentence_total, 4),
+        "paragraph_avg": round(paragraph_avg, 2),
+        "paragraph_std": round(paragraph_std, 2),
+        "dialogue_ratio": round(dialogue_chars / total_chars, 4),
+        "comma_ratio": round(compact.count("\uFF0C") / punctuation_total, 4),
+        "question_ratio": round((compact.count("\uFF1F") + compact.count("?")) / punctuation_total, 4),
+        "exclamation_ratio": round((compact.count("\uFF01") + compact.count("!")) / punctuation_total, 4),
+    }
+
+
+def _reference_style_profile(ws):
+    reference_root = getattr(ws, "reference", None) or os.path.dirname(str(ws.reference_sample))
+    payload = load_human_style_profile(reference_root)
+    library_metrics = payload.get("metrics") if isinstance(payload, dict) else None
+    if isinstance(library_metrics, dict) and library_metrics.get("sentence_count"):
+        metrics = dict(library_metrics)
+        metrics["source"] = "reference/style_library/profile.json"
+        metrics["human_anchor"] = True
+        metrics["human_style_library"] = True
+        return metrics
+    sample = _sample_reference_style_text(ws)
+    metrics = _prose_style_metrics(sample)
+    metrics["source"] = "reference/sample_novel.txt"
+    metrics["human_anchor"] = True
+    return metrics
+
+
+def _author_style_sample_path(ws):
+    return os.path.join(ws.file_system, "writing", "author_style_sample.txt")
+
+
+def _sample_author_style_text(ws, max_chars=160000, windows=6):
+    """Load a fixed user-authored prose corpus used as the highest-priority style anchor."""
+    text = _read_file(_author_style_sample_path(ws)) or ""
+    if len(text) <= max_chars:
+        return text
+    window = max(5000, max_chars // windows)
+    max_start = max(0, len(text) - window)
+    starts = [round(max_start * i / max(1, windows - 1)) for i in range(windows)]
+    return "\n\n".join(text[start:start + window] for start in starts)
+
+
+def _author_style_profile(ws):
+    sample = _sample_author_style_text(ws)
+    if not sample:
+        return None
+    metrics = _prose_style_metrics(sample)
+    metrics["source"] = "writing/author_style_sample.txt"
+    metrics["sample_chars"] = len(sample)
+    metrics["author_anchor"] = True
+    return metrics
+
+
+def _effective_style_profile(ws):
+    """Prefer the user's own prose when available; otherwise use the reference novel statistics."""
+    author = _author_style_profile(ws)
+    if author and author.get("sentence_count", 0) >= 4:
+        return author
+    return _reference_style_profile(ws)
+
+
+def _author_style_anchor_text(ws, chapter_num, max_chars=6000, target_paragraphs=10):
+    """Rotate through a fixed human-written corpus so every chapter is anchored without prompt-copy drift."""
+    sample = _sample_author_style_text(ws)
+    if not sample:
+        return ""
+    paragraphs = [
+        item.strip() for item in re.split(r"\n\s*\n", sample.replace("\r\n", "\n").replace("\r", "\n"))
+        if item.strip()
+    ]
+    paragraphs = [
+        item for item in paragraphs
+        if len(re.sub(r"\s+", "", item)) >= 18
+        and not re.match(r"^(?:#{1,6}\s*)?第[^\n]{0,40}[章回节]", item)
+    ]
+    if not paragraphs:
+        return ""
+    count = min(target_paragraphs, len(paragraphs))
+    stride = max(1, len(paragraphs) // count)
+    offset = ((max(1, int(chapter_num)) - 1) * 3) % len(paragraphs)
+    indices = []
+    seen = set()
+    for i in range(len(paragraphs) * 2):
+        index = (offset + i * stride) % len(paragraphs)
+        if index in seen:
+            continue
+        seen.add(index)
+        indices.append(index)
+        if len(indices) >= count:
+            break
+    selected = []
+    used = 0
+    for index in sorted(indices):
+        paragraph = paragraphs[index]
+        if selected and used + len(paragraph) > max_chars:
+            break
+        selected.append(paragraph)
+        used += len(paragraph)
+    if not selected:
+        selected = [paragraphs[offset][:max_chars]]
+    return "\n\n---\n\n".join(selected)
+
+
+def _aligned_reference_chapter_context(ws, volume, chapter_num, total_chapters, max_chars=7000):
+    """Return a human reference chapter aligned by volume/progress plus its extracted rhythm card."""
+    raw = load_chapter_text(ws, volume, chapter_num, total_chapters) or ""
+    if not raw:
+        return {"text": "", "chapter": 0, "rhythm": {}}
+
+    meta_path = os.path.join(ws.reference_chapters, "_volumes.json")
+    ref_chapter = 0
+    try:
+        with open(meta_path, "r", encoding="utf-8") as handle:
+            volumes = json.load(handle)
+        vol_idx = max(0, int(volume) - 1)
+        if vol_idx < len(volumes):
+            vol_dir = os.path.join(ws.reference_chapters, volumes[vol_idx]["dir"])
+            files = sorted(
+                name for name in os.listdir(vol_dir)
+                if name.endswith(".md") and not name.startswith("_")
+            )
+            if files and total_chapters > 0:
+                local_index = int((max(1, int(chapter_num)) - 1) / max(1, int(total_chapters)) * len(files))
+                local_index = min(local_index, len(files) - 1)
+                match = re.match(r"^(\d+)_", files[local_index])
+                if match:
+                    ref_chapter = int(match.group(1))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError, KeyError, IndexError):
+        ref_chapter = 0
+
+    paragraphs = _split_chapter_paragraphs(raw)
+    if paragraphs and re.match(r"^(?:#{1,6}\s*)?第.{0,40}[章回节]", paragraphs[0]):
+        paragraphs = paragraphs[1:]
+    selected = []
+    if paragraphs:
+        wanted = min(10, len(paragraphs))
+        positions = sorted({round((len(paragraphs) - 1) * i / max(1, wanted - 1)) for i in range(wanted)})
+        used = 0
+        for index in positions:
+            paragraph = paragraphs[index].strip()
+            if not paragraph:
+                continue
+            if selected and used + len(paragraph) > max_chars:
+                break
+            selected.append(paragraph)
+            used += len(paragraph)
+    excerpt = "\n\n---\n\n".join(selected)
+    if not excerpt:
+        excerpt = raw[:max_chars]
+
+    rhythm = {}
+    if ref_chapter:
+        candidates = [
+            os.path.join(ws.reference, "chapter_cards", f"chapter_{ref_chapter:05d}.json"),
+            os.path.join(ws.reference, "chapter_cards", f"chapter_{ref_chapter:04d}.json"),
+            os.path.join(ws.reference, "chapter_cards", f"chapter_{ref_chapter:03d}.json"),
+        ]
+        card_path = next((path for path in candidates if os.path.exists(path)), candidates[-1])
+        try:
+            card = json.loads(_read_file(card_path) or "{}")
+        except json.JSONDecodeError:
+            card = {}
+        if isinstance(card, dict):
+            rhythm = {
+                "chapter_rhythm": card.get("chapter_rhythm") or {},
+                "story_line": card.get("story_line") or "",
+                "highlights": card.get("highlights") or [],
+            }
+    return {"text": excerpt, "chapter": ref_chapter, "rhythm": rhythm}
+
+
+def _reference_anchor_prompt_text(anchor):
+    if not isinstance(anchor, dict) or not anchor.get("text"):
+        return ""
+    rhythm = anchor.get("rhythm") or {}
+    chapter = int(anchor.get("chapter") or 0)
+    rhythm_text = json.dumps(rhythm, ensure_ascii=False, indent=2) if rhythm else "（未找到该章节奏卡，仅使用人工原文样本。）"
+    chapter_label = str(chapter) if chapter else "按卷内进度匹配"
+    return (
+        "=== 人工参考小说同位置章节锚点（只模仿写法与叙述节奏，绝不能复制剧情、人物、专名或原句）===\n"
+        f"对应参考章节：{chapter_label}\n"
+        "【该章节奏/叙事结构】\n"
+        f"{rhythm_text}\n\n"
+        "【人工原文风格样本】\n"
+        f"{anchor['text']}\n\n"
+        "执行要求：学习场景如何起笔、动作与对白如何交替、信息何时揭示、段落如何呼吸、冲突如何逐步加压、章末如何收束；"
+        "只迁移这些写作机制，不迁移参考小说的事件与措辞。"
+    )
+
+
+def _human_style_anchor_for_query(ws, query, fallback_anchor=None):
+    context = retrieve_human_style_context(ws.reference, query, max_samples=3, max_chars=6800)
+    rendered = format_human_style_context(context)
+    if rendered:
+        return rendered
+    if fallback_anchor is not None:
+        return _reference_anchor_prompt_text(fallback_anchor)
+    return ""
+
+
+def _style_drift_score(text, profile):
+    """Measure chapter-level drift from a style profile without penalizing total chapter length."""
+    metrics = _prose_style_metrics(text)
+    sentence_std = max(4.0, float(profile.get("sentence_std") or 8.0))
+    paragraph_std = max(30.0, float(profile.get("paragraph_std") or 60.0))
+    score = abs(float(metrics.get("sentence_avg") or 0) - float(profile.get("sentence_avg") or 0)) / sentence_std
+    score += abs(float(metrics.get("short_sentence_ratio") or 0) - float(profile.get("short_sentence_ratio") or 0)) * 2.0
+    score += abs(float(metrics.get("long_sentence_ratio") or 0) - float(profile.get("long_sentence_ratio") or 0)) * 1.7
+    score += abs(float(metrics.get("paragraph_avg") or 0) - float(profile.get("paragraph_avg") or 0)) / paragraph_std * 0.45
+    score += abs(float(metrics.get("dialogue_ratio") or 0) - float(profile.get("dialogue_ratio") or 0)) * 1.4
+    score += abs(float(metrics.get("comma_ratio") or 0) - float(profile.get("comma_ratio") or 0)) * 0.7
+    score += abs(float(metrics.get("question_ratio") or 0) - float(profile.get("question_ratio") or 0)) * 0.45
+    score += abs(float(metrics.get("exclamation_ratio") or 0) - float(profile.get("exclamation_ratio") or 0)) * 0.45
+    return round(score, 3)
+
+
+def _reference_style_profile_text(profile):
+    is_author = bool(profile.get("author_anchor")) or profile.get("source") == "writing/author_style_sample.txt"
+    heading = (
+        "User-authored fixed statistical style baseline (highest priority; preserve this voice across chapters):"
+        if is_author else
+        "Reference-novel statistical style baseline (style only; never copy wording or plot):"
+    )
+    tail = (
+        "This baseline comes from the user's own human-written prose. Treat previous generated chapters as continuity context, not style authority. "
+        "Use the distribution as a stable target while keeping natural local variation."
+        if is_author else
+        "Use these as a distribution target, not a rigid quota. Preserve natural local variation."
+    )
+    return (
+        f"{heading}\n"
+        f"- mean sentence length: {profile.get('sentence_avg', 0):.1f}; variation: {profile.get('sentence_std', 0):.1f}\n"
+        f"- short sentences <=12 chars: {profile.get('short_sentence_ratio', 0):.1%}; long sentences >=30 chars: {profile.get('long_sentence_ratio', 0):.1%}\n"
+        f"- mean paragraph length: {profile.get('paragraph_avg', 0):.1f}; variation: {profile.get('paragraph_std', 0):.1f}\n"
+        f"- dialogue character ratio: {profile.get('dialogue_ratio', 0):.1%}\n"
+        f"- punctuation tendencies: comma {profile.get('comma_ratio', 0):.1%}, question {profile.get('question_ratio', 0):.1%}, exclamation {profile.get('exclamation_ratio', 0):.1%}\n"
+        f"{tail}"
+    )
+
+
+def _paragraph_naturalization_score(paragraph, profile):
+    if profile.get("human_style_library"):
+        # Isolated punctuation or a long/short paragraph is not a defect. Only concrete repetitions
+        # select a paragraph automatically; distribution drift remains diagnostic, not a rewrite trigger.
+        units = [p.strip() for p in re.split(r"(?<=[。！？!?])", paragraph) if p.strip()]
+        repeated = len(units) - len(set(units))
+        explanatory = sum(paragraph.count(term) for term in ("他意识到", "她意识到", "这让他明白", "这让她明白", "总而言之"))
+        repeated_start = len(units) >= 4 and len({unit[:3] for unit in units}) == 1
+        return 3.0 * repeated + (3.0 if explanatory >= 3 else 0.0) + (3.0 if repeated_start else 0.0)
+    metrics = _prose_style_metrics(paragraph)
+    score = 0.0
+    ref_sentence_avg = max(1.0, float(profile.get("sentence_avg") or 16.0))
+    ref_sentence_std = max(4.0, float(profile.get("sentence_std") or 8.0))
+    ref_paragraph_avg = max(20.0, float(profile.get("paragraph_avg") or 90.0))
+    ref_paragraph_std = max(30.0, float(profile.get("paragraph_std") or 60.0))
+    score += abs(float(metrics.get("sentence_avg") or ref_sentence_avg) - ref_sentence_avg) / ref_sentence_std
+    score += abs(float(metrics.get("short_sentence_ratio") or 0) - float(profile.get("short_sentence_ratio") or 0)) * 2.2
+    score += abs(float(metrics.get("long_sentence_ratio") or 0) - float(profile.get("long_sentence_ratio") or 0)) * 1.8
+    score += min(1.5, abs(len(paragraph) - ref_paragraph_avg) / ref_paragraph_std) * 0.45
+    score += abs(float(metrics.get("dialogue_ratio") or 0) - float(profile.get("dialogue_ratio") or 0)) * 1.2
+    score += min(4.0, sum(item["count"] for item in _chapter_style_violations(paragraph)) * 2.2)
+    sentences = [part.strip() for part in re.split(r"(?<=[\u3002\uFF01\uFF1F!?])", paragraph) if part.strip()]
+    starts = [re.sub(r"^[\u201c\u201d\s]+", "", item)[:1] for item in sentences]
+    if len(starts) >= 3:
+        for token in ("\u4ed6", "\u5979", "\u5b83"):
+            if sum(1 for start in starts if start == token) >= 3:
+                score += 0.8
+                break
+    return round(score, 3)
+
+
+def _split_chapter_paragraphs(chapter_text):
+    text = (chapter_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    return [item.strip() for item in re.split(r"\n\s*\n", text) if item.strip()]
+
+
+def _select_naturalization_paragraphs(paragraphs, profile, strength="standard", pass_index=1):
+    settings = {
+        "light": (2.8, 0.22),
+        "standard": (1.9 if pass_index == 1 else 2.25, 0.38 if pass_index == 1 else 0.18),
+        "deep": (1.35 if pass_index == 1 else 1.75, 0.60 if pass_index == 1 else 0.32),
+    }
+    threshold, cap_ratio = settings.get(strength, settings["standard"])
+    library_mode = bool(profile.get("human_style_library"))
+    if library_mode:
+        # 让初稿的人工样本模仿承担主要风格；精修只处理明显漂移，不把整章洗成另一套均匀文风。
+        threshold += 0.25
+        cap_ratio *= 0.60
+    drift_boost = max(0.0, min(1.0, float(profile.get("_drift_boost") or 0.0)))
+    if drift_boost:
+        threshold = max(0.8, threshold - 0.55 * drift_boost)
+        cap_ratio = min(0.45 if library_mode else 0.82, cap_ratio + (0.12 if library_mode else 0.24) * drift_boost)
+    candidates = []
+    scored = []
+    for index, paragraph in enumerate(paragraphs):
+        if index == 0 and re.match(r"^(?:#{1,6}\s*)?第.{0,30}[章回节]", paragraph):
+            continue
+        score = _paragraph_naturalization_score(paragraph, profile)
+        hard_violation = not library_mode and bool(_chapter_style_violations(paragraph))
+        scored.append((score, index))
+        if hard_violation or score >= threshold:
+            candidates.append((1 if hard_violation else 0, score, index))
+    cap = max(1, math.ceil(max(1, len(paragraphs) - 1) * cap_ratio))
+    selected = [index for _, _, index in sorted(candidates, reverse=True)[:cap]]
+    if drift_boost >= 0.2 and len(selected) < cap:
+        selected_set = set(selected)
+        for _, index in sorted(scored, reverse=True):
+            if index in selected_set:
+                continue
+            selected.append(index)
+            selected_set.add(index)
+            if len(selected) >= cap:
+                break
+    return selected
+
+
+def _naturalize_paragraph_batch(llm, paragraphs, indices, profile_text, writing_guide, strength, style_anchor="", cancel_event=None):
+    records = []
+    for index in indices:
+        records.append({
+            "index": index,
+            "before": paragraphs[index - 1][-500:] if index > 0 else "",
+            "target": paragraphs[index],
+            "after": paragraphs[index + 1][:500] if index + 1 < len(paragraphs) else "",
+        })
+    prompt = PromptLoader.load(
+        "naturalize_paragraphs",
+        strength=strength,
+        style_profile=profile_text,
+        writing_guide=writing_guide,
+        style_anchor=style_anchor or "(No fixed user-authored style sample is configured.)",
+        paragraph_records=json.dumps(records, ensure_ascii=False, indent=2),
+    )
+    if cancel_event is not None and hasattr(llm, "generate_cancelable"):
+        raw = llm.generate_cancelable(prompt, cancel_event, temperature=0.55, is_json=True)
+    else:
+        raw = llm.generate(prompt, temperature=0.55, is_json=True)
+    payload = parse_json_response(raw)
+    replacements = payload.get("replacements") if isinstance(payload, dict) else None
+    if not isinstance(replacements, list):
+        return 0
+    allowed = set(indices)
+    applied = 0
+    for item in replacements:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("index"))
+        except (TypeError, ValueError):
+            continue
+        text = normalize_text(str(item.get("text") or "")).strip()
+        if index not in allowed or not text:
+            continue
+        original = paragraphs[index]
+        if not (max(4, len(original) * 0.55) <= len(text) <= max(80, len(original) * 1.55)):
+            continue
+        if text == original:
+            allowed.discard(index)
+            continue
+        if re.findall(r"\d+(?:\.\d+)?", original) != re.findall(r"\d+(?:\.\d+)?", text):
+            continue
+        paragraphs[index] = text
+        allowed.discard(index)
+        applied += 1
+    return applied
+
+
+def _naturalize_chapter_locally(llm, chapter_text, profile, writing_guide, strength="standard", style_anchor="", cancel_event=None):
+    strength = strength if strength in {"light", "standard", "deep"} else "standard"
+    paragraphs = _split_chapter_paragraphs(chapter_text)
+    if len(paragraphs) <= 1:
+        return chapter_text, 0
+    profile_text = _reference_style_profile_text(profile)
+    selection_profile = dict(profile)
+    if not profile.get("human_style_library") and (profile.get("human_anchor") or profile.get("author_anchor")):
+        drift = _style_drift_score(chapter_text, profile)
+        selection_profile["_drift_boost"] = max(0.0, min(1.0, (drift - 0.65) / 1.35))
+    total_applied = 0
+    passes = 1 if strength == "light" or (profile.get("human_style_library") and strength == "standard") else 2
+    for pass_index in range(1, passes + 1):
+        indices = _select_naturalization_paragraphs(paragraphs, selection_profile, strength, pass_index)
+        if not indices:
+            break
+        for offset in range(0, len(indices), 6):
+            total_applied += _naturalize_paragraph_batch(
+                llm, paragraphs, indices[offset:offset + 6], profile_text,
+                writing_guide, strength, style_anchor=style_anchor, cancel_event=cancel_event,
+            )
+    return "\n\n".join(paragraphs), total_applied
 
 
 def _read_file(path):
@@ -302,6 +774,75 @@ def _load_story_design_assets(ws):
         "long_mainline": _read_file(_story_design_path(ws, "long_mainline.md")) or "（未生成全书长线主线）",
         "stage_roadmap": _read_file(_story_design_path(ws, "stage_roadmap.md")) or "（未生成舞台路线图）",
         "character_arcs": rough or _read_file(_story_design_path(ws, "character_arcs.md")) or "（未生成角色成长线）",
+    }
+
+
+_MECHANICS_DECISION_KEYWORDS = (
+    "系统", "面板", "任务", "经验", "积分", "等级", "境界", "修为", "属性", "技能",
+    "天赋", "资源", "装备", "物品", "伤势", "身份", "关系", "好感", "声望", "货币",
+    "灵石", "数值", "升级", "突破", "奖励", "惩罚", "状态", "system", "panel", "level",
+    "skill", "resource", "inventory", "relationship", "points", "exp",
+)
+
+
+def _compact_mechanics_decision_text(text, max_chars=18000):
+    """为一次性的机制分类提取高信号上下文，不用于正文/章纲生成。"""
+    text = normalize_text(text or "").strip()
+    if not text or len(text) <= max_chars:
+        return text
+
+    lines = text.splitlines()
+    selected = set()
+    # 首尾用于保留总体定位、开局条件与最终形态。
+    head_chars = 0
+    for index, line in enumerate(lines):
+        selected.add(index)
+        head_chars += len(line) + 1
+        if head_chars >= 2600:
+            break
+    tail_chars = 0
+    for index in range(len(lines) - 1, -1, -1):
+        selected.add(index)
+        tail_chars += len(lines[index]) + 1
+        if tail_chars >= 2600:
+            break
+
+    # 所有阶段/舞台标题都保留；机制相关命中额外保留前后两行，避免只留下孤立关键词。
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        is_heading = bool(re.match(r"^#{1,6}\s+", stripped))
+        has_signal = any(keyword.lower() in stripped.lower() for keyword in _MECHANICS_DECISION_KEYWORDS)
+        if is_heading:
+            selected.add(index)
+        if has_signal:
+            for nearby in range(max(0, index - 2), min(len(lines), index + 3)):
+                selected.add(nearby)
+
+    rendered = "\n".join(lines[index] for index in sorted(selected)).strip()
+    if len(rendered) <= max_chars:
+        return rendered
+    # 极端情况下仍做硬上限，但同时保留筛选结果的头尾，避免只看到开局或只看到终局。
+    half = max_chars // 2
+    return rendered[:half].rstrip() + "\n\n……（机制判断上下文已按高信号压缩）……\n\n" + rendered[-half:].lstrip()
+
+
+def _load_mechanics_decision_assets(ws):
+    """首次章纲前只为“是否启用机制层”提供有限、但高信号的设计上下文。"""
+    rough = (
+        _read_file(_rough_outline_path(ws))
+        or _read_file(_story_design_path(ws, "core_gameplay.md"))
+        or "（未生成粗略大纲/核心玩法）"
+    )
+    long_mainline = _read_file(_story_design_path(ws, "long_mainline.md")) or "（未生成全书长线主线）"
+    stage_roadmap = _read_file(_story_design_path(ws, "stage_roadmap.md")) or "（未生成舞台路线图）"
+    character_arcs = _read_file(_story_design_path(ws, "character_arcs.md")) or rough
+    return {
+        # 粗略大纲与长线主线通常体量适中，优先完整保留；超大时才启用高信号压缩。
+        "core_gameplay": _compact_mechanics_decision_text(rough, 16000),
+        "long_mainline": _compact_mechanics_decision_text(long_mainline, 20000),
+        # 舞台路线图可能达到数十万字，只保留舞台标题、首尾和机制/成长/资源相关上下文。
+        "stage_roadmap": _compact_mechanics_decision_text(stage_roadmap, 18000),
+        "character_arcs": _compact_mechanics_decision_text(character_arcs, 12000),
     }
 
 
@@ -1096,7 +1637,7 @@ def _ensure_system_panel_decision(ws, cancel_event=None):
     status = system_panel_status(ws)
     if status["selection_mode"] != "auto" or status["decided"]:
         return status
-    assets = _load_story_design_assets(ws)
+    assets = _load_mechanics_decision_assets(ws)
     llm = _get_lite_llm()
     if not llm:
         raise RuntimeError("未配置可用模型，无法自动判断是否需要系统面板。")
@@ -2212,8 +2753,6 @@ def sync_stage_outline_from_new_reference(ws, instruction="", cancel_event=None)
     """仅用新增拆解内容调整末阶段或追加新阶段，不触碰世界观与粗略大纲。"""
     _ = instruction  # 保留对话入口签名；增量生成严格使用固定结构输入。
     new_cards = _unused_reference_chapter_context(ws)
-    if not new_cards:
-        raise ValueError("没有检测到尚未被阶段粗纲使用的新增拆解章节。")
     stage_path = _stage_outline_path(ws)
     stage_outline = _read_file(stage_path)
     sections = _stage_outline_sections(stage_outline)
@@ -2238,26 +2777,57 @@ def sync_stage_outline_from_new_reference(ws, instruction="", cancel_event=None)
         raise RuntimeError("请先完成新小说世界观与粗略大纲。")
     old_count = len(sections)
     target_count = len(reference_volumes)
-    start_number = old_count if target_count == old_count else old_count + 1
-    operation_for_first = "调整最后阶段" if target_count == old_count else "新增阶段"
+    structure_changed = target_count != old_count
+    if not new_cards and not structure_changed:
+        raise ValueError("没有检测到新增拆解章节或新的参考分卷结构。")
 
-    for number in range(start_number, target_count + 1):
+    if structure_changed:
+        rebuilt_sections = []
+        for number in range(1, target_count + 1):
+            volume = reference_volumes[number - 1]
+            reference_structure = _reference_volume_stage_structure(ws, volume)
+            stage_context = (
+                "【上一阶段】\n" + rebuilt_sections[-1]
+                if rebuilt_sections else
+                "（这是按新分卷结构重建后的第一个阶段，无上一阶段。）"
+            )
+            prompt = PromptLoader.load(
+                "design_stage_outline_incremental",
+                operation="按新的参考分卷结构重建阶段",
+                stage_number=number,
+                worldview=worldview,
+                rough_outline=rough_outline,
+                stage_context=stage_context,
+                reference_volume_structure=reference_structure,
+            )
+            payload = parse_json_response(
+                _call_design_llm(
+                    llm, prompt, f"按新分卷重建阶段粗纲{number}/{target_count}",
+                    cancel_event=cancel_event,
+                )
+            )
+            candidate = _normalize_design_field(payload, "stage_outline_md", "")
+            numbers = [int(value) for value in STAGE_OUTLINE_HEADING_RE.findall(candidate)]
+            if numbers != [number]:
+                raise RuntimeError(
+                    f"阶段粗纲重建结果编号无效：期望阶段{number}，检测到 {numbers or '无编号'}。"
+                )
+            rebuilt_sections.append(candidate.strip())
+        stage_outline = "\n\n".join(rebuilt_sections)
+    else:
+        number = old_count
         sections = _stage_outline_sections(stage_outline)
-        operation = operation_for_first if number == start_number else "新增阶段"
         volume = reference_volumes[number - 1]
         reference_structure = _reference_volume_stage_structure(ws, volume)
-        if operation == "调整最后阶段":
-            stage_context = (
-                "【倒数第二个阶段】\n"
-                + (sections.get(number - 1) or "（这是第一阶段，无倒数第二阶段）")
-                + "\n\n【当前最后一个阶段】\n"
-                + sections[number]
-            )
-        else:
-            stage_context = "【当前最后一个阶段】\n" + sections[number - 1]
+        stage_context = (
+            "【倒数第二个阶段】\n"
+            + (sections.get(number - 1) or "（这是第一阶段，无倒数第二阶段）")
+            + "\n\n【当前最后一个阶段】\n"
+            + sections[number]
+        )
         prompt = PromptLoader.load(
             "design_stage_outline_incremental",
-            operation=operation,
+            operation="调整最后阶段",
             stage_number=number,
             worldview=worldview,
             rough_outline=rough_outline,
@@ -2276,21 +2846,19 @@ def sync_stage_outline_from_new_reference(ws, instruction="", cancel_event=None)
             raise RuntimeError(
                 f"阶段粗纲增量结果编号无效：期望阶段{number}，检测到 {numbers or '无编号'}。"
             )
-        if operation == "调整最后阶段":
-            heading = list(STAGE_OUTLINE_HEADING_RE.finditer(stage_outline))[-1]
-            stage_outline = stage_outline[:heading.start()].rstrip() + "\n\n" + candidate.strip()
-        else:
-            stage_outline = stage_outline.rstrip() + "\n\n" + candidate.strip()
+        heading = list(STAGE_OUTLINE_HEADING_RE.finditer(stage_outline))[-1]
+        stage_outline = stage_outline[:heading.start()].rstrip() + "\n\n" + candidate.strip()
 
     _backup_design_files(ws, "concept_stage_increment", {"stage_outline": stage_path})
     _write_file(stage_path, stage_outline)
-    _mark_reference_chapters_used(ws, [number for number, _ in new_cards])
+    if new_cards:
+        _mark_reference_chapters_used(ws, [number for number, _ in new_cards])
     revision = _mark_concept_revision(ws)
     state = _load_story_design_state(ws)
     state["pending_reference_stage_sync"] = True
     state["reference_stage_increment"] = {
         "concept_revision": revision,
-        "kind": "adjust_last" if target_count == old_count else "append",
+        "kind": "rebuild_from_reference_volumes" if structure_changed else "adjust_last",
         "previous_stage_count": old_count,
         "current_stage_count": target_count,
         "reference_chapters": [number for number, _ in new_cards],
@@ -2298,9 +2866,9 @@ def sync_stage_outline_from_new_reference(ws, instruction="", cancel_event=None)
     }
     _write_json_file(_story_design_state_path(ws), state)
     operation_note = (
+        f"参考分卷已变化，阶段粗纲已按 {target_count} 个参考卷从阶段1开始重建。"
+        if structure_changed else
         f"已根据新增拆解章节调整最后一个阶段（阶段{old_count}）。"
-        if target_count == old_count else
-        f"参考小说由 {old_count} 卷扩展为 {target_count} 卷，已追加阶段{old_count + 1}-{target_count}。"
     )
     return {
         "stage_outline": stage_outline,
@@ -2540,10 +3108,17 @@ def _sync_later_stages_serial(ws, instruction, cancel_event=None):
     completed_parts = _completed_stage_prefix(stage_roadmap, len(stage_sections))
     if not completed_parts:
         raise RuntimeError("当前舞台路线图没有可识别的连续舞台，无法执行末尾增量同步。")
-    # 阶段数没有增加，说明新增参考内容补充了最后一卷：只重做最后一个舞台。
-    adjust_last = len(completed_parts) == len(stage_sections)
-    if adjust_last:
-        completed_parts = completed_parts[:-1]
+    increment = design_state.get("reference_stage_increment") or {}
+    rebuild_all = isinstance(increment, dict) and increment.get("kind") == "rebuild_from_reference_volumes"
+    if rebuild_all:
+        # 参考分卷结构变化后，旧舞台1也对应旧的“全书卷”，不能继续保留。
+        completed_parts = []
+        adjust_last = False
+    else:
+        # 阶段数没有增加，说明新增参考内容补充了最后一卷：只重做最后一个舞台。
+        adjust_last = len(completed_parts) == len(stage_sections)
+        if adjust_last:
+            completed_parts = completed_parts[:-1]
     next_stage = len(completed_parts) + 1
 
     _backup_design_files(ws, "stage_increment", {"stage_roadmap": stage_path})
@@ -2601,6 +3176,8 @@ def _sync_later_stages_serial(ws, instruction, cancel_event=None):
         "long_mainline": long_mainline,
         "stage_roadmap": "\n\n".join(completed_parts),
         "adjustment_note": (
+            f"参考分卷结构已变化，已从舞台1开始重新生成全部 {len(stage_sections)} 个舞台。"
+            if rebuild_all else
             f"阶段数未增加，已仅重新生成最后一个舞台（舞台{next_stage}）。"
             if adjust_last else
             f"已保留已有舞台，并从舞台{next_stage}开始串行补齐后续舞台。"
@@ -4956,6 +5533,23 @@ def refine_chapter_outlines(ws, volume, arc_idx, instruction):
     return {"adjustment_note": f"已按指令调整 {len(written)} 章章纲。", "artifacts": written}
 
 
+def _write_generated_chapter(path, content):
+    """Publish a complete chapter/trace atomically; a failed write never truncates the old draft."""
+    import tempfile
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("模型未返回有效正文；没有覆盖现有章节。")
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".draft-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content.rstrip() + "\n")
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def _raw_chapter_backup_path(ws, volume, chapter_num):
     raw_dir = os.path.join(ws.file_system, "drafts", f"vol_{volume:02d}", "raw_chapters")
     return os.path.join(raw_dir, f"{chapter_num:03d}_第{chapter_num}章.raw.md")
@@ -5138,30 +5732,31 @@ def _humanize_chapter_text(
     chapter_num,
     chapter_text,
     cancel_event=None,
+    strength="standard",
+    style_profile=None,
+    style_anchor="",
 ):
     _backup_raw_chapter(ws, volume, chapter_num, chapter_text)
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    writing_guide = (
-        _read_file(os.path.join(ws.file_system, "writing", "system_prompt.md"))
-        or _read_file(os.path.join(project_root, "core", "system_prompt.md"))
-        or "（无额外生文规范，请严格保持待精修正文已有的作者声音。）"
+    profile = dict(style_profile or _effective_style_profile(ws))
+    library_ready = human_style_library_status(ws.reference).get("ready", False)
+    if library_ready:
+        profile["human_style_library"] = True
+    writing_guide = _read_file(os.path.join(ws.file_system, "writing", "system_prompt.md")) or ""
+    if not writing_guide and not library_ready:
+        writing_guide = _read_file(os.path.join(project_root, "core", "system_prompt.md")) or ""
+    writing_guide = writing_guide or "Preserve the supplied scene examples' narrative mechanics and all story facts."
+    result, applied = _naturalize_chapter_locally(
+        llm, chapter_text, profile, writing_guide,
+        strength=strength, style_anchor=style_anchor, cancel_event=cancel_event,
     )
-    prompt = PromptLoader.load(
-        "humanize_chapter",
-        chapter_text=chapter_text,
-        writing_guide=writing_guide,
-    )
-    result = normalize_text(_generate_with_cancel(llm, prompt, cancel_event))
-    result = result or chapter_text
-    violations = _chapter_style_violations(result)
-    if violations:
-        print(
-            "  -> AI精修结果命中风格硬校验，启动定向重修："
-            + "、".join(f"{item['label']} {item['count']}处" for item in violations)
-        )
-        result = _repair_chapter_style(
-            llm, result, violations, cancel_event=cancel_event,
-        )
+    if applied:
+        print(f"  -> Naturalization rewrote {applied} locally selected paragraphs.")
+    else:
+        result = chapter_text
+        print("  -> Naturalization found no paragraph that required local rewriting.")
+    # Do not follow a local edit with the legacy whole-chapter style repair. That erased the
+    # reference voice and could discard an otherwise valid chapter for normal punctuation.
     return result
 
 
@@ -5217,10 +5812,6 @@ def _repair_chapter_knowledge(chapter_text, audit):
         if original not in result:
             continue
         candidate = result.replace(original, correction["replacement"], 1)
-        if sum(item["count"] for item in _chapter_style_violations(candidate)) > sum(
-            item["count"] for item in _chapter_style_violations(result)
-        ):
-            continue
         result = candidate
         applied.append(correction)
     return result, applied
@@ -5233,6 +5824,7 @@ def gen_serial_chapters(
     max_chapters=None,
     humanize=True,
     humanize_existing=False,
+    humanize_strength="standard",
     end_chapter=None,
     regenerate_existing=False,
     writing_instruction="",
@@ -5249,30 +5841,50 @@ def gen_serial_chapters(
     context = _load_volume_outline_context(ws, volume)
     if not context:
         return
-    # 读取写作文风规范（从项目根目录读取）
+    # 语言风格优先级：人工参考小说 > 用户自定义规范 > 项目默认规范。
+    # 默认 system_prompt 只在没有人工文笔库时作为兜底，避免把不同作者洗成统一模板。
     custom_style_path = os.path.join(ws.file_system, "writing", "system_prompt.md")
-    style_guide = (
-        _read_file(custom_style_path)
-        or _read_file(os.path.join(_root, "core", "system_prompt.md"))
-        or ""
-    )
+    custom_style_guide = _read_file(custom_style_path) or ""
+    default_style_guide = _read_file(os.path.join(_root, "core", "system_prompt.md")) or ""
     agents_md = _read_file(os.path.join(_root, "core", "agents.md")) or ""
-    writing_rules = f"{style_guide}\n\n{agents_md}" if style_guide or agents_md else "（无写作文风规范）"
-    hard_style_rules = (
-        "=== 本轮正文硬性风格约束（最终优先）===\n"
-        "1. 不使用二分对比套式：例如“不是A，而是B”“不是X，也不是Y，是Z”。\n"
-        "2. 不使用否定递进套式：例如“不仅是A，更是B”“不只是A，更是B”。\n"
-        "3. 不使用破折号。需要停顿时用逗号、句号或直接拆句。\n"
-        "4. 如果参考小说、章纲、前序正文或写作规范示例中出现上述写法，只能视为反例，不能照搬。\n"
-    )
-    writing_rules = f"{writing_rules}\n\n{hard_style_rules}"
-    print(
-        "  -> 已加载写作规范："
-        f"{'工作区生文规范' if _read_file(custom_style_path) else 'core/system_prompt.md'} {len(style_guide)} 字；"
-        f"core/agents.md {len(agents_md)} 字。"
-    )
-    if not style_guide and not agents_md:
-        print("     警告：未加载到写作规范，正文生成将缺少风格约束。")
+
+    style_library = human_style_library_status(ws.reference)
+    if (not style_library.get("ready") or style_library.get("needs_rebuild")) and os.path.isfile(ws.reference_sample):
+        print("  -> 正在补建/升级人工场景索引；不重做剧情拆解，也不在正文前发起高级画像请求。")
+        while True:
+            try:
+                style_library = build_human_style_library(
+                    ws.reference_sample, ws.reference, llm=None, force=False, cancel_event=cancel_event,
+                )
+                break
+            except LLMCallCancelled:
+                if stop_event is not None and stop_event.is_set():
+                    return {"adjustment_note": "人工库准备已停止；未修改正文。", "artifacts": [], "stopped": True}
+                if pause_event is None:
+                    raise
+                if progress_callback:
+                    progress_callback("paused", 0, 0, "人工库准备已暂停")
+                pause_event.wait()
+                if cancel_event is not None:
+                    cancel_event.clear()
+        if not style_library.get("ready"):
+            raise RuntimeError("人工场景库构建未完成，未静默回退；请先检查参考小说。")
+
+    if style_library.get("ready"):
+        writing_rules = custom_style_guide or "（无额外用户自定义语言规则）"
+        if agents_md:
+            writing_rules = f"{writing_rules}\n\n{agents_md}"
+        print(
+            "  -> 语言风格采用人工文笔库最高优先级；"
+            "项目默认 system_prompt 不参与句式、段长、视角和章末节奏控制。"
+        )
+    else:
+        style_guide = custom_style_guide or default_style_guide
+        writing_rules = f"{style_guide}\n\n{agents_md}" if style_guide or agents_md else "（无额外写作规范）"
+        print(
+            "  -> 人工文笔库不可用，暂用："
+            f"{'工作区生文规范' if custom_style_guide else 'core/system_prompt.md'}。"
+        )
 
     # 扫描章纲
     outlines_dir = os.path.join(ws.file_system, "chapter_outlines", f"vol_{volume:02d}")
@@ -5285,24 +5897,57 @@ def gen_serial_chapters(
         print(f"错误：章纲目录为空。请先运行 chapter-outlines。")
         return
 
-    # 推断总章数
+    # 推断本卷的全局章号范围；参考风格锚定按“卷内进度”匹配，而不是按全书章号匹配。
+    outline_numbers = []
     total_chapters = 0
     for f in outline_files:
         m = re.match(r'^chapter_(\d+)\.md$', f)
         if m:
-            total_chapters = max(total_chapters, int(m.group(1)))
+            number = int(m.group(1))
+            outline_numbers.append(number)
+            total_chapters = max(total_chapters, number)
+    volume_first_chapter = min(outline_numbers) if outline_numbers else 1
+    volume_chapter_count = len(outline_numbers) or max(1, total_chapters)
 
     print(f">>> 串行生成正文：卷{volume}，共 {total_chapters} 章 <<<")
 
     llm = _get_lite_llm()
     if not llm:
         return
+    reference_style_profile = _effective_style_profile(ws)
+    reference_style_text = _reference_style_profile_text(reference_style_profile)
+    humanize_llm = _get_humanize_llm() if humanize else None
+    if humanize and not humanize_llm:
+        return
+    print(
+        "  -> Human reference style baseline: "
+        f"sentence {reference_style_profile.get('sentence_avg', 0):.1f} +/- {reference_style_profile.get('sentence_std', 0):.1f}; "
+        f"paragraph {reference_style_profile.get('paragraph_avg', 0):.1f}; "
+        f"dialogue {reference_style_profile.get('dialogue_ratio', 0):.1%}."
+    )
+    style_library = human_style_library_status(ws.reference)
+    if style_library.get("ready"):
+        print(
+            "  -> 人工文笔库：已启用，"
+            f"{style_library.get('sample_count', 0)} 个连续人工样本，"
+            f"覆盖 {style_library.get('chapter_count', 0)} 章；正文按场景动态检索。"
+        )
+    else:
+        print("  -> 人工文笔库尚未建立；本次暂时回退到旧的参考章节锚点。")
 
-    def humanize_with_controls(ch_num, text, completed, total):
+    def humanize_with_controls(ch_num, text, completed, total, style_anchor=""):
         while True:
             try:
                 return _humanize_chapter_text(
-                    llm, ws, volume, ch_num, text, cancel_event=cancel_event,
+                    humanize_llm, ws, volume, ch_num, text,
+                    cancel_event=cancel_event,
+                    strength=humanize_strength,
+                    style_profile=reference_style_profile,
+                    style_anchor=style_anchor or _reference_anchor_prompt_text(
+                        _aligned_reference_chapter_context(
+                            ws, volume, ch_num - volume_first_chapter + 1, volume_chapter_count,
+                        )
+                    ),
                 )
             except LLMCallCancelled:
                 if stop_event is not None and stop_event.is_set():
@@ -5393,11 +6038,24 @@ def gen_serial_chapters(
             if not existing_text:
                 print(f"  警告：第{ch_num}章正文为空，跳过。")
                 continue
-            result = humanize_with_controls(ch_num, existing_text, idx, len(tasks))
+            existing_outline = _read_file(os.path.join(outlines_dir, f"chapter_{ch_num:03d}.md"))
+            existing_arc = _find_story_arc_for_chapter(ws, volume, ch_num)
+            style_query = f"{existing_arc}\n{existing_outline}\n{existing_text[:2500]}"
+            style_anchor = _human_style_anchor_for_query(
+                ws,
+                style_query,
+                _aligned_reference_chapter_context(
+                    ws, volume, ch_num - volume_first_chapter + 1, volume_chapter_count,
+                ),
+            )
+            result = humanize_with_controls(ch_num, existing_text, idx, len(tasks), style_anchor=style_anchor)
             if result is None:
                 break
-            result = _format_chapter_paragraphs(result)
-            _write_file(out_file, result)
+            if not style_library.get("ready"):
+                result = _format_chapter_paragraphs(result)
+            if ch_num in _finalized_chapter_numbers(ws, "drafts", volume):
+                continue
+            _write_generated_chapter(out_file, result)
             processed_chapters.append(ch_num)
             if progress_callback:
                 progress_callback("generating", idx + 1, len(tasks), f"第{ch_num}章正文已精修并写入")
@@ -5461,9 +6119,60 @@ def gen_serial_chapters(
             volume=volume,
             trace_key=f"chapter_{ch_num:03d}",
         )
+        reference_anchor = _aligned_reference_chapter_context(
+            ws, volume, ch_num - volume_first_chapter + 1, volume_chapter_count,
+        )
+        # Planner, retrieval and Writer share cancellation and the same immutable library index.
+        scene_plan = None
+        while True:
+            try:
+                scene_plan = plan_chapter_scenes(
+                    llm, chapter_outline, story_arc=story_arc_summary,
+                    recent_context=history_section, instruction=writing_instruction, cancel_event=cancel_event,
+                )
+                scene_style_context, scene_trace = "", []
+                if style_library.get("ready"):
+                    style_index = _read_json_file(os.path.join(ws.reference, "style_library", "index.json")) or {}
+                    style_items = style_index.get("samples") or []
+                    profile_payload = load_human_style_profile(ws.reference, style_index)
+                    reference_anchor_text = format_human_style_context({
+                        "ready": True, "profile": profile_payload.get("profile") or {},
+                        "metrics": profile_payload.get("metrics") or {},
+                    }, include_samples=False)
+                    scene_style_context = build_scene_style_context(
+                        ws.reference, style_items, scene_plan, samples_per_scene=4, chars_per_scene=5000,
+                        max_total_chars=18000, trace=scene_trace, cancel_event=cancel_event,
+                    )
+                else:
+                    style_index = {}
+                    style_query = f"{chapter_outline}\n{writing_instruction}\n第{ch_num}章"
+                    reference_anchor_text = _human_style_anchor_for_query(ws, style_query, reference_anchor)
+                break
+            except LLMCallCancelled:
+                if stop_event is not None and stop_event.is_set():
+                    scene_plan = None
+                    break
+                if pause_event is None:
+                    raise
+                if progress_callback:
+                    progress_callback("paused", idx, len(tasks), f"第{ch_num}章场景规划/检索已暂停")
+                pause_event.wait()
+                if cancel_event is not None:
+                    cancel_event.clear()
+        if scene_plan is None:
+            break
+        scene_plan_text = json.dumps({"scenes": scene_plan}, ensure_ascii=False, indent=2)
         context = (
-            f"=== 写作规范 ===\n{writing_rules}\n\n"
-            f"=== 目标世界事实约束（只用于校验，不要求逐条写出）===\n"
+            f"=== 剧情与安全约束 ===\n{writing_rules}\n\n"
+            f"=== 语言风格优先级 ===\n"
+            f"Style Engine v2 的 Author Bible 与逐 Scene 人工原文案例是语言表达的最高风格依据。"
+            f"章纲决定发生什么；Scene Plan 决定这一场完成什么；人工案例只决定类似场景通常怎样处理叙述、节奏、信息和情绪。"
+            f"前序正文只负责连续性，不能成为文风权威。\n\n"
+            f"=== 人工参考小说全书风格指纹 / Author Bible 基线 ===\n{reference_style_text}\n\n"
+            + (f"{reference_anchor_text}\n\n" if reference_anchor_text else "")
+            + f"=== 当前章 Scene Plan ===\n{scene_plan_text}\n\n"
+            + (f"=== 逐 Scene 检索到的连续人工原文案例 ===\n{scene_style_context}\n\n" if scene_style_context else "")
+            + f"=== 目标世界事实约束（只用于校验，不要求逐条写出）===\n"
             f"{knowledge_result['context'] or '（未启用目标世界知识库；以章纲和前文为准。）'}\n\n"
             f"=== 当前故事情节单元 ===\n{story_arc_summary or '（未找到故事情节单元，请严格以章纲为准）'}\n\n"
             f"=== 前序正文（仅用于承接，不得覆盖本章章纲）===\n{history_section}\n\n"
@@ -5472,18 +6181,28 @@ def gen_serial_chapters(
             + f"=== 当前章章纲（第{ch_num}章，剧情唯一蓝图）===\n{chapter_outline}\n\n"
             + (f"=== 用户本轮调整要求 ===\n{writing_instruction}\n\n" if writing_instruction else "")
             + "=== 最终执行提醒 ===\n"
-            + "只输出本章标题和正文；严格执行章纲；如启用系统面板，"
-              "正文要自然呈现章初到章末的变化，不得把章末状态提前生效；"
-              "不得照抄前序正文；输出前静默检查全部硬性禁用规则。"
+            + "只输出本章标题和正文；按 Scene Plan 顺序完成章纲既定事件，但不要把 Scene Plan 写成小标题或提纲；"
+              "每个 Scene 应吸收该 Scene 对应人工案例的处理机制，同时保持自然过渡和整章连贯；"
+              "不得照抄参考原句、人物、专名、事件或前序正文。"
         )
 
         prompt = PromptLoader.load(
-            "adaptive_drafting",
-            context=context,
-            start_chapter=ch_num,
-            end_chapter=ch_num,
-            chapter_count=1,
+            "adaptive_drafting", context=context, start_chapter=ch_num, end_chapter=ch_num, chapter_count=1,
         )
+        if len(prompt) > 60000:
+            raise ValueError(f"第{ch_num}章输入共{len(prompt)}字符，超过60000字符保护上限；未截断章纲、前文或设定，请检查异常大的输入。")
+        trace_path = os.path.join(ws.file_system, "drafts", f"vol_{volume:02d}", "style_traces",
+                                  f"chapter_{ch_num:03d}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json")
+        _write_generated_chapter(trace_path, json.dumps({
+            "chapter": ch_num, "planner_sources": list(dict.fromkeys(s.get("planner_source") for s in scene_plan)),
+            "scene_plan": scene_plan, "retrieval": scene_trace,
+            "library_revision": style_index.get("pipeline_revision"),
+            "library_source_digest": style_index.get("source_digest"),
+            "prompt_chars": len(prompt), "style_context_chars": len(scene_style_context),
+            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        }, ensure_ascii=False, indent=2))
+        print(f"  -> 场景规划 {len(scene_plan)} 场；样本上下文 {len(scene_style_context)} 字；完整输入 {len(prompt)} 字。")
+        print(f"     本章规划/检索记录：{trace_path}")
         while True:
             try:
                 result = normalize_text(_generate_with_cancel(llm, prompt, cancel_event))
@@ -5500,9 +6219,14 @@ def gen_serial_chapters(
                     cancel_event.clear()
         if result is None:
             break
+        if not result.strip():
+            raise RuntimeError(f"第{ch_num}章模型返回空正文，未覆盖已有文件。")
+        _backup_raw_chapter(ws, volume, ch_num, result)
         if humanize:
-            print(f"  第{ch_num}章正文去AI味处理中...")
-            result = humanize_with_controls(ch_num, result, idx, len(tasks))
+            print(f"  第{ch_num}章正文局部精修中（使用同一批场景案例）...")
+            result = humanize_with_controls(
+                ch_num, result, idx, len(tasks), style_anchor=reference_anchor_text + "\n\n" + scene_style_context,
+            )
             if result is None:
                 break
         while True:
@@ -5533,7 +6257,13 @@ def gen_serial_chapters(
             audit["applied_corrections"] = applied
             audit["rewrite"] = bool(applied)
         record_consistency_audit(knowledge_result.get("snapshot_path"), audit)
-        result = _format_chapter_paragraphs(result)
+        if not style_library.get("ready"):
+            result = _format_chapter_paragraphs(result)
+        if stop_event is not None and stop_event.is_set():
+            break
+        if ch_num in _finalized_chapter_numbers(ws, "drafts", volume):
+            print(f"  -> 第{ch_num}章已在生成期间确认最终版，不覆盖。")
+            continue
         if regenerate_existing and os.path.exists(out_file):
             import shutil
             backup_dir = os.path.join(out_dir, "versions")
@@ -5542,7 +6272,7 @@ def gen_serial_chapters(
             backup_path = os.path.join(backup_dir, f"{os.path.basename(out_file)}_{stamp}")
             if not os.path.exists(backup_path):
                 shutil.copy2(out_file, backup_path)
-        _write_file(out_file, result)
+        _write_generated_chapter(out_file, result)
         processed_chapters.append(ch_num)
         if progress_callback:
             progress_callback("generating", idx + 1, len(tasks), f"第{ch_num}章正文已写入")

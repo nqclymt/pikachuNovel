@@ -1,6 +1,6 @@
 """PikachuNovel runtime version metadata."""
 
-APP_VERSION = "2.0.9"
+APP_VERSION = "2.1.0"
 UPDATE_REPOSITORY = "nqclymt/pikachuNovel"
 UPDATE_RELEASES_URL = f"https://github.com/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_RELEASES_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/"

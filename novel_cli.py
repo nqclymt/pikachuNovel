@@ -308,26 +308,60 @@ def _run_reference_pipeline(ws, batch_size, max_chapters=None, resume=False, sou
 
     outlines_dir = os.path.join(ws.reference, "outlines")
     is_partial = target_chapters < total_chapters
-    if not is_partial and os.path.isdir(outlines_dir):
+    analysis_complete = target_chapters >= total_chapters and bool(analysis_result.get("is_complete", True))
+    structure_complete = False
+
+    # 单章事实卡与故事片段完成后立即持久化“拆解完成”。智能分卷是独立收尾步骤，
+    # 后续即使网络中断，也不能把整本参考小说重新标成未完成。
+    _save_reference_state(ws, {
+        "source_name": source_name or previous_state.get("source_name") or os.path.basename(ws.reference_sample),
+        "source_encoding": source_encoding or previous_state.get("source_encoding") or "UTF-8",
+        "total_chapters": total_chapters,
+        "processed_chapters": target_chapters,
+        "is_complete": analysis_complete,
+        "analysis_complete": analysis_complete,
+        "structure_complete": False if analysis_complete else None,
+        "status": "complete" if analysis_complete else "in_progress",
+        "batch_size": batch_size,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    })
+
+    if not is_partial and analysis_complete and os.path.isdir(outlines_dir):
         vol_dirs = [
             name for name in sorted(os.listdir(outlines_dir))
             if re.match(r"^vol_\d+_.+$", name) and os.path.isdir(os.path.join(outlines_dir, name))
         ]
-        if len(vol_dirs) <= 1:
-            print("\n检测到仅有一个分卷，执行智能分卷...")
+        resegment_state_path = os.path.join(outlines_dir, "resegment_state.json")
+        resegment_phase = ""
+        if os.path.isfile(resegment_state_path):
+            try:
+                with open(resegment_state_path, "r", encoding="utf-8") as handle:
+                    resegment_phase = str((json.load(handle) or {}).get("phase") or "")
+            except (OSError, json.JSONDecodeError, TypeError):
+                resegment_phase = ""
+        needs_resegment = len(vol_dirs) <= 1 or (resegment_phase and resegment_phase != "complete")
+        if needs_resegment:
+            print("\n执行智能分卷收尾（支持断点续跑）...")
             from training.outline_builder import resegment
             from training.reference_analyzer import mark_resegmented
-            resegment(outlines_dir)
-            resulting_dirs = [
-                name for name in os.listdir(outlines_dir)
-                if re.match(r"^vol_\d+_.+$", name) and os.path.isdir(os.path.join(outlines_dir, name))
-            ]
-            if resulting_dirs and not any("全书" in name for name in resulting_dirs):
+            try:
+                structure_complete = bool(resegment(outlines_dir))
+            except Exception as exc:
+                structure_complete = False
+                print(f"  警告：智能分卷收尾暂未完成：{exc}")
+                print("  已完成的事实卡、故事片段、预摘要、分卷边界和卷纲均已保留；下次可直接继续收尾。")
+            if structure_complete:
                 mark_resegmented(ws.reference)
             else:
-                print("  智能分卷未完成，保留当前拆解状态以便下次重试。")
+                print("  智能分卷未完成；基础拆解已完成，可稍后继续结构化收尾。")
         else:
-            print(f"\n检测到 {len(vol_dirs)} 个分卷，跳过智能分卷。")
+            structure_complete = len(vol_dirs) > 1 and not any("全书" in name for name in vol_dirs)
+            print(f"\n检测到 {len(vol_dirs)} 个完整分卷，跳过智能分卷。")
+    elif not is_partial and not analysis_complete:
+        pending = int(analysis_result.get("pending_chapter_count") or 0)
+        segmented = int(analysis_result.get("segmented_chapter_count") or 0)
+        print(f"\n故事片段尚未完整闭合：已覆盖 {segmented}/{total_chapters} 章，待收束约 {pending} 章。")
+        print("  本次不会提前执行智能分卷；下次继续拆解时从现有故事片段断点补齐。")
     elif is_partial:
         print("\n当前为部分拆解，保留现有情节单元；完成整本拆解后再执行智能分卷。")
 
@@ -336,8 +370,10 @@ def _run_reference_pipeline(ws, batch_size, max_chapters=None, resume=False, sou
         "source_encoding": source_encoding or previous_state.get("source_encoding") or "UTF-8",
         "total_chapters": total_chapters,
         "processed_chapters": target_chapters,
-        "is_complete": target_chapters >= total_chapters,
-        "status": "complete",
+        "is_complete": analysis_complete,
+        "analysis_complete": analysis_complete,
+        "structure_complete": structure_complete if analysis_complete else None,
+        "status": "complete" if analysis_complete else "in_progress",
         "batch_size": batch_size,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     })
@@ -433,6 +469,39 @@ def cmd_reference_resume(args):
         source_name=snapshot_source_name,
         source_encoding=snapshot_source_encoding,
         rebuild_reference=args.rebuild_reference,
+    )
+
+
+def cmd_reference_style(args):
+    """只建立/重建人工文笔库，不重复执行剧情结构拆解。"""
+    from core.config import ConfigLoader
+    from core.llm_provider import LLMProvider
+    from core.workspace import init_workspace
+    from training.human_style_library import build_human_style_library
+
+    ws = init_workspace(args.workspace)
+    if not os.path.isfile(ws.reference_sample):
+        print("错误：当前工作区尚未导入参考小说。")
+        return
+    if args.max_chapters is not None and args.max_chapters < 1:
+        print("错误：--max-chapters 必须是正整数。")
+        return
+    config = ConfigLoader.get_data_builder_config()
+    if not config.get("api_key"):
+        config["api_key"] = os.getenv("OPENAI_API_KEY")
+    if not config.get("api_key"):
+        print("错误：未检测到参考拆解模型 API Key，无法提炼人工文笔画像。")
+        return
+    status = build_human_style_library(
+        ws.reference_sample,
+        ws.reference,
+        max_chapters=args.max_chapters,
+        llm=LLMProvider(**config),
+        force=bool(args.force),
+    )
+    print(
+        f"人工文笔库已完成：{status.get('sample_count', 0)} 个连续样本，"
+        f"覆盖 {status.get('chapter_count', 0)} 章。"
     )
 
 
@@ -597,7 +666,8 @@ def cmd_write(args):
     gen_serial_chapters(ws, volume=volume, start_chapter=args.start,
                         max_chapters=args.max,
                         humanize=not args.no_humanize,
-                        humanize_existing=args.humanize_existing)
+                        humanize_existing=args.humanize_existing,
+                        humanize_strength=args.naturalize_strength)
 
 
 def cmd_web(args):
@@ -662,6 +732,14 @@ def main():
     p.add_argument("--batch-size", type=int, default=20, help="每次读取章节数，用于识别故事情节单元（默认20）")
     p.add_argument("--max-chapters", type=int, default=None, help="将拆解范围扩展到前 N 章（默认整本）")
     p.add_argument("--rebuild-reference", action="store_true", help="清除已有参考拆解资产后重新拆解")
+
+    # novel-outline
+
+    # reference-style
+    p = sub.add_parser("reference-style", help="建立或重建参考小说人工文笔库，不重复剧情拆解")
+    p.add_argument("workspace", help="工作区名称")
+    p.add_argument("--max-chapters", type=int, default=None, help="只使用前 N 章提炼（默认使用已有整本参考小说）")
+    p.add_argument("--force", action="store_true", help="强制重新提炼连续样本和作者文笔画像")
 
     # novel-outline
     p = sub.add_parser("novel-outline", help="生成核心玩法、长线主线、舞台路线图和角色线")
@@ -770,7 +848,8 @@ def main():
     p.add_argument("--start", type=int, default=1, help="起始章节号")
     p.add_argument("--max", type=int, default=None, help="最大章节数")
     p.add_argument("--no-humanize", action="store_true", help="关闭正文生成后的自动去AI味后处理")
-    p.add_argument("--humanize-existing", action="store_true", help="对已存在的正文执行去AI味；默认只处理本次新生成章节")
+    p.add_argument("--humanize-existing", action="store_true", help="Naturalize existing chapter files; by default only newly generated chapters are processed")
+    p.add_argument("--naturalize-strength", choices=("light", "standard", "deep"), default="standard", help="Naturalization strength; default: standard")
 
     # web
     p = sub.add_parser("web", help="启动本地可视化工作台")
@@ -795,6 +874,7 @@ def main():
         "list": cmd_list,
         "init": cmd_init,
         "reference-resume": cmd_reference_resume,
+        "reference-style": cmd_reference_style,
         "world-import": cmd_world_import,
         "world-build": cmd_world_build,
         "novel-outline": cmd_novel_outline,

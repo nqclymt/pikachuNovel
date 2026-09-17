@@ -18,6 +18,21 @@ def _conversation_path(root: Path, workspace: str, volume: int, arc_idx: int) ->
     return root / workspace / "file_system" / "chapters" / f"vol_{volume:02d}" / f"conversation_arc_{arc_idx}.json"
 
 
+def _job_state_path(root: Path, workspace: str, volume: int, arc_idx: int) -> Path:
+    return root / workspace / "file_system" / "chapters" / f"vol_{volume:02d}" / f"job_arc_{arc_idx}.json"
+
+
+def _serializable_job(job: dict[str, Any]) -> dict[str, Any]:
+    fields = (
+        "id", "status", "phase", "completed", "total", "progress_kind",
+        "message", "error", "prompt_count", "current_prompt_id", "prompt_model",
+        "prompt_created_at",
+    )
+    data = {key: job.get(key) for key in fields if key in job}
+    data["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    return data
+
+
 class DraftConversation:
     def __init__(self, volume: int, arc_idx: int, path: Path):
         self.volume, self.arc_idx, self.path = volume, arc_idx, path
@@ -51,6 +66,21 @@ class DraftChatManager:
         self._jobs: dict[tuple[str, int, int], dict[str, Any]] = {}
         self._lock = threading.Lock()
 
+    def _persist_job(self, workspace, volume, arc_idx, job):
+        path = _job_state_path(self.root, workspace, volume, arc_idx)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(_serializable_job(job), ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _load_persisted_job(self, workspace, volume, arc_idx):
+        path = _job_state_path(self.root, workspace, volume, arc_idx)
+        if not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
+
     def get(self, workspace, volume, arc_idx):
         key = (workspace, volume, arc_idx)
         if key not in self._cache:
@@ -68,9 +98,26 @@ class DraftChatManager:
     def writing_guide_status(self, workspace):
         ws = init_workspace(workspace)
         custom = Path(ws.file_system) / "writing" / "system_prompt.md"
+        reference_sample = Path(ws.reference_sample)
+        reference_chapters = Path(ws.reference_chapters) / "_volumes.json"
+        anchor_ready = reference_sample.is_file() and bool(reference_sample.stat().st_size)
+        from training.human_style_library import human_style_library_status
+        style_library = human_style_library_status(ws.reference)
         return {
             "custom": custom.is_file() and bool(custom.read_text(encoding="utf-8").strip()),
             "name": "自定义生文规范" if custom.is_file() else "项目默认 system_prompt.md",
+            "reference_anchor": anchor_ready,
+            "reference_anchor_aligned": anchor_ready and reference_chapters.is_file(),
+            "reference_anchor_name": reference_sample.name if anchor_ready else "",
+            "human_style_library": bool(style_library.get("ready")),
+            "human_style_profile_ready": bool(style_library.get("advanced_profile_ready")),
+            "human_style_profile_mode": str(style_library.get("profile_mode") or "missing"),
+            "human_style_sample_count": int(style_library.get("sample_count") or 0),
+            "human_style_scene_example_count": int(style_library.get("scene_example_count") or style_library.get("sample_count") or 0),
+            "human_style_engine": str(style_library.get("engine") or ""),
+            "human_style_pipeline_revision": int(style_library.get("pipeline_revision") or 0),
+            "human_style_needs_rebuild": bool(style_library.get("needs_rebuild")),
+            "human_style_chapter_count": int(style_library.get("chapter_count") or 0),
         }
 
     def save_writing_guide(self, workspace, content, source_name):
@@ -94,6 +141,7 @@ class DraftChatManager:
     def start_message(
         self, workspace, volume, arc_idx, message, resume_incomplete=False,
         humanize=True,
+        humanize_strength="standard",
     ):
         display = message.strip()
         if not display:
@@ -113,6 +161,7 @@ class DraftChatManager:
                 "prompt_history": [], "prompt_count": 0, "error": "",
             }
             self._jobs[key] = job
+        self._persist_job(workspace, volume, arc_idx, job)
         conv = self.get(workspace, volume, arc_idx)
         if not resume_incomplete:
             conv.turns.append({"role": "user", "content": display, "at": datetime.now().isoformat(timespec="seconds")})
@@ -124,6 +173,7 @@ class DraftChatManager:
                 if active and active["id"] == job["id"]:
                     active.update(phase=phase, completed=completed, total=total, message=detail,
                                   status="paused" if phase == "paused" else active["status"])
+                    self._persist_job(workspace, volume, arc_idx, active)
 
         def worker():
             def trace_prompt(event: dict) -> None:
@@ -144,6 +194,7 @@ class DraftChatManager:
                     active = self._jobs.get(key)
                     if active and active["id"] == job["id"]:
                         active["message"] = message.removeprefix("[LLMProvider] ")
+                        self._persist_job(workspace, volume, arc_idx, active)
             trace_context = capture_prompts(trace_prompt)
             status_context = capture_llm_status(trace_status)
             trace_context.__enter__()
@@ -194,6 +245,7 @@ class DraftChatManager:
                         ws, volume=volume, start_chapter=start, end_chapter=arc["end_ch"],
                         max_chapters=arc["end_ch"] - start + 1,
                         humanize=bool(humanize),
+                        humanize_strength=humanize_strength,
                         regenerate_existing=(mode == "refine"),
                         refinement_mode=(
                             refinement_mode if mode == "refine" else "regenerate"
@@ -211,11 +263,13 @@ class DraftChatManager:
                     if active and active["id"] == job["id"]:
                         stopped = bool(result.get("stopped"))
                         active.update(status="stopped" if stopped else "completed", phase="stopped" if stopped else "completed", message=note)
+                        self._persist_job(workspace, volume, arc_idx, active)
             except Exception as exc:
                 with self._lock:
                     active = self._jobs.get(key)
                     if active and active["id"] == job["id"]:
                         active.update(status="failed", phase="failed", message="生成失败", error=str(exc))
+                        self._persist_job(workspace, volume, arc_idx, active)
             finally:
                 status_context.__exit__(None, None, None)
                 trace_context.__exit__(None, None, None)
@@ -229,7 +283,22 @@ class DraftChatManager:
             if job:
                 return {key: value for key, value in job.items() if key not in {"pause_event", "stop_event", "cancel_event", "prompt_history"}}
         from training.adaptive_builder import chapter_draft_resume_status
-        return {"status": "idle", "phase": "idle", "message": "", **chapter_draft_resume_status(init_workspace(workspace), volume, arc_idx)}
+        resume = chapter_draft_resume_status(init_workspace(workspace), volume, arc_idx)
+        persisted = self._load_persisted_job(workspace, volume, arc_idx)
+        if persisted:
+            status = str(persisted.get("status") or "")
+            if status in {"running", "pausing", "paused", "stopping"}:
+                return {
+                    **persisted,
+                    **resume,
+                    "status": "interrupted",
+                    "phase": "interrupted",
+                    "message": "上次正文任务意外中断，可从已保存章节继续。",
+                    "error": persisted.get("error") or "程序或本地服务在任务完成前退出。",
+                }
+            if status == "failed":
+                return {**persisted, **resume}
+        return {"status": "idle", "phase": "idle", "message": "", **resume}
 
     def prompts(self, workspace, volume, arc_idx):
         with self._lock:
@@ -320,6 +389,7 @@ class DraftChatManager:
         conv.save()
         with self._lock:
             self._jobs.pop(key, None)
+        _job_state_path(self.root, workspace, volume, arc_idx).unlink(missing_ok=True)
         return {
             "reset": True,
             "deleted": deleted,

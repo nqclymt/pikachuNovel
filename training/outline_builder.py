@@ -4,6 +4,7 @@ import re
 import argparse
 import json
 import shutil
+import hashlib
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -958,166 +959,264 @@ def run_outline_build(txt_path=None, output_dir=None, batch_size=20, skip_chapte
         rebuild=rebuild_reference,
     )
 
-def resegment(outlines_dir):
-    """基于已有故事情节单元或旧批次摘要重新执行虚拟分卷。
+RESEGMENT_STATE_VERSION = 2
+RESEGMENT_CHUNK_SIZE = 20
+RESEGMENT_SEGMENT_CLIP = 1800
 
-    两种情况：
-    1. vol_01_全书/ 存在：直接从此目录重新分卷。
-    2. 已有虚拟卷目录（含 meta.json）：将所有卷的情节单元/批次摘要汇总到 vol_01_全书/ 并去重，再重新分卷。
-    """
-    all_batch_dir = None
-    for name in os.listdir(outlines_dir):
-        if VOL_DIR_RE.match(name) and "全书" in name:
-            all_batch_dir = os.path.join(outlines_dir, name)
-            break
 
-    if not all_batch_dir or not os.path.isdir(all_batch_dir):
-        # 没有全书目录，查找虚拟卷目录并汇总情节单元/批次摘要
+def _resegment_state_path(outlines_dir):
+    return os.path.join(outlines_dir, "resegment_state.json")
+
+
+def _resegment_cache_dir(outlines_dir):
+    return os.path.join(outlines_dir, ".resegment_cache")
+
+
+def _load_resegment_state(outlines_dir):
+    path = _resegment_state_path(outlines_dir)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _save_resegment_state(outlines_dir, state):
+    path = _resegment_state_path(outlines_dir)
+    os.makedirs(outlines_dir, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def _compact_resegment_segment(text, limit=RESEGMENT_SEGMENT_CLIP):
+    text = normalize_text(text or "")
+    if len(text) <= limit:
+        return text
+    head = max(1, int(limit * 0.68))
+    tail = max(1, limit - head)
+    return text[:head].rstrip() + "\n...（中间已压缩）...\n" + text[-tail:].lstrip()
+
+
+def _resegment_source_items(arc_items, segment_summaries):
+    if arc_items:
+        return [
+            {"start_ch": int(item["start_ch"]), "end_ch": int(item["end_ch"]), "content": item["content"]}
+            for item in arc_items
+        ]
+    items = []
+    for index, content in enumerate(segment_summaries, start=1):
+        ranges = [(int(m.group(1)), int(m.group(2))) for m in re.finditer(r"第\s*(\d+)\s*[-~—至]\s*(\d+)\s*章", content or "")]
+        start_ch = min((a for a, _ in ranges), default=index)
+        end_ch = max((b for _, b in ranges), default=start_ch)
+        items.append({"start_ch": start_ch, "end_ch": end_ch, "content": content})
+    return items
+
+
+def _resegment_source_fingerprint(items):
+    digest = hashlib.sha256()
+    for item in items:
+        digest.update(f"{item['start_ch']}:{item['end_ch']}\n".encode("utf-8"))
+        digest.update((item.get("content") or "").encode("utf-8"))
+        digest.update(b"\n---\n")
+    return digest.hexdigest()
+
+
+def _resegment_chunk_summaries(outlines_dir, source_items, llm, state):
+    cache_dir = _resegment_cache_dir(outlines_dir)
+    os.makedirs(cache_dir, exist_ok=True)
+    chunks_state = state.setdefault("chunks", {})
+    summaries = []
+    chunks = [source_items[i:i + RESEGMENT_CHUNK_SIZE] for i in range(0, len(source_items), RESEGMENT_CHUNK_SIZE)]
+    state.update({"chunk_count": len(chunks), "chunk_size": RESEGMENT_CHUNK_SIZE, "phase": "summarizing"})
+    _save_resegment_state(outlines_dir, state)
+    for chunk_index, chunk in enumerate(chunks, start=1):
+        start_ch = min(item["start_ch"] for item in chunk)
+        end_ch = max(item["end_ch"] for item in chunk)
+        digest = hashlib.sha256()
+        parts = []
+        for item in chunk:
+            compact = _compact_resegment_segment(item.get("content") or "")
+            digest.update(f"{item['start_ch']}:{item['end_ch']}\n{compact}\n".encode("utf-8"))
+            parts.append(f"【第{item['start_ch']}-{item['end_ch']}章】\n{compact}")
+        fingerprint = digest.hexdigest()
+        cache_path = os.path.join(cache_dir, f"chunk_{chunk_index:03d}.md")
+        cached_state = chunks_state.get(str(chunk_index)) if isinstance(chunks_state, dict) else None
+        cached = _read_file(cache_path)
+        if cached and isinstance(cached_state, dict) and cached_state.get("fingerprint") == fingerprint:
+            print(f"  -> 复用分卷预摘要 {chunk_index}/{len(chunks)}（第{start_ch}-{end_ch}章）")
+            summaries.append(cached)
+            continue
+        print(f"  -> 生成分卷预摘要 {chunk_index}/{len(chunks)}（第{start_ch}-{end_ch}章）...")
+        prompt = PromptLoader.load(
+            "virtual_volume_chunk_summary",
+            start_chapter=start_ch,
+            end_chapter=end_ch,
+            segment_count=len(chunk),
+            segment_text="\n\n---\n\n".join(parts),
+        )
+        generated = normalize_text(llm.generate(prompt))
+        if not generated:
+            raise RuntimeError(f"分卷预摘要 {chunk_index}/{len(chunks)} 未获得模型输出。")
+        summary = f"【区间{chunk_index}：第{start_ch}-{end_ch}章】\n{generated}"
+        _write_file(cache_path, summary)
+        chunks_state[str(chunk_index)] = {"fingerprint": fingerprint, "start_ch": start_ch, "end_ch": end_ch}
+        _save_resegment_state(outlines_dir, state)
+        summaries.append(summary)
+    return summaries
+
+
+def resegment(outlines_dir, llm=None):
+    """分层、可恢复的智能分卷。返回 True 表示结构化收尾完整完成。"""
+    all_batch_dir = os.path.join(outlines_dir, _vol_dir_name(0, "全书"))
+    if not os.path.isdir(all_batch_dir):
         vol_dirs = _volume_dirs(outlines_dir)
-
         if not vol_dirs:
             print("错误：未找到任何卷目录，无法执行重新分卷。")
-            return
-
+            return False
         print("  -> 未找到 vol_01_全书，从现有卷目录汇总故事情节单元...")
-        all_batch_dir = os.path.join(outlines_dir, _vol_dir_name(0, "全书"))
         os.makedirs(all_batch_dir, exist_ok=True)
         os.makedirs(_arc_dir(all_batch_dir), exist_ok=True)
-
-        # 收集所有 story arc 和旧 batch 文件并按文件名去重
-        seen = set()
-        seen_batches = set()
+        seen, seen_batches = set(), set()
         for name, vol_path in vol_dirs:
             for arc in _story_arc_files(vol_path):
-                if arc["file"] in seen:
-                    continue
-                shutil.copy2(arc["path"], os.path.join(_arc_dir(all_batch_dir), arc["file"]))
-                seen.add(arc["file"])
+                if arc["file"] not in seen:
+                    shutil.copy2(arc["path"], os.path.join(_arc_dir(all_batch_dir), arc["file"]))
+                    seen.add(arc["file"])
             for bf in sorted(os.listdir(vol_path)):
                 if re.match(r'^batch_\d+_\d+\.md$', bf) and bf not in seen_batches:
                     shutil.copy2(os.path.join(vol_path, bf), os.path.join(all_batch_dir, bf))
                     seen_batches.add(bf)
-
-        # 删除旧的虚拟卷目录
         for name, vol_path in vol_dirs:
             shutil.rmtree(vol_path, ignore_errors=True)
-            print(f"  -> 已删除旧卷目录：{name}")
-
         print(f"  -> 已汇总 {len(seen)} 个故事情节单元、{len(seen_batches)} 个旧批次摘要到 vol_01_全书/")
 
-    # 以下统一处理：优先从 story arcs 读取，旧工作区回退 batch 摘要
     arc_items = _load_story_arc_texts(all_batch_dir)
-    segment_summaries = []
-    if arc_items:
-        segment_summaries = [item["content"] for item in arc_items]
-    else:
+    segment_summaries = [item["content"] for item in arc_items]
+    if not segment_summaries:
         for bf in sorted(os.listdir(all_batch_dir)):
             if re.match(r'^batch_\d+_\d+\.md$', bf):
                 content = _read_file(os.path.join(all_batch_dir, bf))
                 if content:
                     segment_summaries.append(content)
-
     if not segment_summaries:
         print("错误：未找到故事情节单元或批次摘要。")
-        return
+        return False
 
-    batch_summaries = []
-    for bf in sorted(os.listdir(all_batch_dir)):
-        if re.match(r'^batch_\d+_\d+\.md$', bf):
-            content = _read_file(os.path.join(all_batch_dir, bf))
-            if content:
-                batch_summaries.append(content)
+    if llm is None:
+        builder_config = ConfigLoader.get_data_builder_config()
+        if not builder_config.get("api_key"):
+            builder_config["api_key"] = os.getenv("OPENAI_API_KEY")
+        if not builder_config.get("api_key"):
+            print("错误：未检测到 API Key。")
+            return False
+        llm = LLMProvider(**builder_config)
 
-    # 初始化 LLM
-    builder_config = ConfigLoader.get_data_builder_config()
-    if not builder_config.get("api_key"):
-        builder_config["api_key"] = os.getenv("OPENAI_API_KEY")
-    if not builder_config.get("api_key"):
-        print("错误：未检测到 API Key。")
-        return
-    llm = LLMProvider(**builder_config)
+    source_items = _resegment_source_items(arc_items, segment_summaries)
+    source_fingerprint = _resegment_source_fingerprint(source_items)
+    state = _load_resegment_state(outlines_dir)
+    same_source = state.get("version") == RESEGMENT_STATE_VERSION and state.get("source_fingerprint") == source_fingerprint
+    if not same_source:
+        shutil.rmtree(_resegment_cache_dir(outlines_dir), ignore_errors=True)
+        for name, vol_path in _volume_dirs(outlines_dir):
+            if name != os.path.basename(all_batch_dir) and os.path.isfile(os.path.join(vol_path, "meta.json")):
+                shutil.rmtree(vol_path, ignore_errors=True)
+        state = {
+            "version": RESEGMENT_STATE_VERSION,
+            "source_fingerprint": source_fingerprint,
+            "phase": "pending",
+            "chunks": {},
+            "virtual_volumes": [],
+            "completed_volumes": [],
+            "novel_outline_done": False,
+        }
+        _save_resegment_state(outlines_dir, state)
 
-    # 推算总章数
-    total_ch = 0
-    if arc_items:
-        total_ch = max(item["end_ch"] for item in arc_items)
+    total_ch = max((item["end_ch"] for item in source_items), default=0)
+    print(">>> 虚拟分卷（分层断点模式）<<<")
+    print(f"  故事情节单元/摘要：{len(source_items)} 个，约 {total_ch} 章")
+
+    virtual_volumes = []
+    for item in state.get("virtual_volumes") or []:
+        if isinstance(item, (list, tuple)) and len(item) == 4:
+            virtual_volumes.append((int(item[0]), str(item[1]), int(item[2]), int(item[3])))
+    if virtual_volumes:
+        print(f"  -> 复用已保存的 {len(virtual_volumes)} 个分卷边界。")
     else:
-        for bf in sorted(os.listdir(all_batch_dir)):
-            m = re.match(r'^batch_\d+_(\d+)\.md$', bf)
-            if m:
-                total_ch = max(total_ch, int(m.group(1)))
+        chunk_summaries = _resegment_chunk_summaries(outlines_dir, source_items, llm, state)
+        print(f"  -> 使用 {len(chunk_summaries)} 份预摘要识别卷边界...")
+        seg_result = normalize_text(llm.generate(PromptLoader.load("virtual_volume_segment", batch_summaries="\n\n---\n\n".join(chunk_summaries))))
+        virtual_volumes = _parse_virtual_volumes(seg_result)
+        if not virtual_volumes:
+            state["phase"] = "boundary_pending"
+            _save_resegment_state(outlines_dir, state)
+            print("  警告：分卷边界未生成；预摘要已保存，下次只重试边界判断。")
+            return False
+        virtual_volumes = _snap_to_segments(virtual_volumes, _extract_segment_endpoints(all_batch_dir), total_ch)
+        virtual_volumes = _ensure_min_chapters(virtual_volumes, min_chapters=60)
+        virtual_volumes = _ensure_full_coverage(virtual_volumes, total_ch)
+        state["virtual_volumes"] = [list(item) for item in virtual_volumes]
+        state["phase"] = "volume_outlines"
+        _save_resegment_state(outlines_dir, state)
 
-    print(f">>> 虚拟分卷（重新分卷）<<<")
-    print(f"  故事情节单元/摘要：{len(segment_summaries)} 个文件，约 {total_ch} 章")
-
-    all_batches_text = "\n\n---\n\n".join(segment_summaries)
-    print(f"  -> 调用 LLM 分析故事情节单元，识别卷边界...")
-    seg_prompt = PromptLoader.load("virtual_volume_segment", batch_summaries=all_batches_text)
-    seg_result = normalize_text(llm.generate(seg_prompt))
-
-    virtual_volumes = _parse_virtual_volumes(seg_result)
-    if not virtual_volumes:
-        print("  警告：LLM 未输出有效分卷结果，保持原状。")
-        return
-
-    # 将边界对齐到故事片段端点
-    segment_endpoints = _extract_segment_endpoints(all_batch_dir)
-    virtual_volumes = _snap_to_segments(virtual_volumes, segment_endpoints, total_ch)
-
-    # 检查每卷章节数是否 >= 60，不满足则合并到相邻卷
-    virtual_volumes = _ensure_min_chapters(virtual_volumes, min_chapters=60)
-
-    # 确保覆盖全部章节：首卷从1开始，末卷到 total_ch 结束
-    virtual_volumes = _ensure_full_coverage(virtual_volumes, total_ch)
-
-    print(f"  -> 识别出 {len(virtual_volumes)} 卷（已对齐片段边界）：")
-    for vi, title, sc, ec in virtual_volumes:
-        print(f"     卷{vi}：{title}（第{sc}-{ec}章，{ec - sc + 1}章）")
-    covered = sum(ec - sc + 1 for _, _, sc, ec in virtual_volumes)
-    print(f"  -> 覆盖：{covered}/{total_ch} 章")
-
-    # 分配故事情节单元/旧批次文件
+    print(f"  -> 识别出 {len(virtual_volumes)} 卷（已对齐片段边界）")
     arc_assignment = _assign_story_arcs_to_volumes(all_batch_dir, virtual_volumes)
     batch_assignment = _assign_batches_to_volumes(all_batch_dir, virtual_volumes)
-
-    # 为每个虚拟卷创建目录、复制文件、生成卷纲
+    completed = {int(v) for v in (state.get("completed_volumes") or []) if isinstance(v, int) or str(v).isdigit()}
     new_volume_outlines = []
     for i, (vi, vol_title, start_ch, end_ch) in enumerate(virtual_volumes):
-        vol_dir_name = _vol_dir_name(vi - 1, vol_title)
-        vol_dir = os.path.join(outlines_dir, vol_dir_name)
-
-        print(f"  -> 组织卷{vi}（{vol_title}，第{start_ch}-{end_ch}章）...")
-        os.makedirs(vol_dir, exist_ok=True)
+        vol_dir = os.path.join(outlines_dir, _vol_dir_name(vi - 1, vol_title))
+        meta_path = os.path.join(vol_dir, "meta.json")
+        expected_meta = {"start_ch": start_ch, "end_ch": end_ch}
+        existing_meta = None
+        if os.path.isfile(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    existing_meta = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                pass
+        if existing_meta and existing_meta != expected_meta:
+            shutil.rmtree(vol_dir, ignore_errors=True)
+            completed.discard(vi)
         os.makedirs(_arc_dir(vol_dir), exist_ok=True)
         for arc in arc_assignment.get(i, []):
             shutil.copy2(arc["path"], os.path.join(_arc_dir(vol_dir), arc["file"]))
         for bf in batch_assignment.get(i, []):
             shutil.copy2(os.path.join(all_batch_dir, bf), os.path.join(vol_dir, bf))
-
-        meta = {"start_ch": start_ch, "end_ch": end_ch}
-        with open(os.path.join(vol_dir, "meta.json"), "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False)
-
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(expected_meta, f, ensure_ascii=False)
         outline = _generate_virtual_volume_outline(vol_dir, start_ch, end_ch, llm)
+        if not outline:
+            raise RuntimeError(f"卷{vi}卷纲未生成有效内容。")
         new_volume_outlines.append({"title": vol_title, "outline": outline})
-        print(f"     卷纲已生成")
+        completed.add(vi)
+        state["completed_volumes"] = sorted(completed)
+        state["phase"] = "volume_outlines"
+        _save_resegment_state(outlines_dir, state)
+        print(f"     卷{vi}卷纲已生成（断点已保存）")
 
-    # 删除原始"全书"伪卷目录
-    shutil.rmtree(all_batch_dir, ignore_errors=True)
-
-    # 重写汇总卷纲文件
     volume_outline_path = os.path.join(outlines_dir, "volume_outline.md")
     with open(volume_outline_path, "w", encoding="utf-8") as f:
         f.write("# 参考小说卷纲\n\n")
         for vo in new_volume_outlines:
             f.write(f"## {vo['title']}\n\n{vo['outline']}\n\n---\n\n")
-
-    # 重新生成大纲
-    print(f"\n  -> 重新汇总生成大纲...")
-    extract_novel_outline(new_volume_outlines, llm, outlines_dir, force=True)
-
-    print(f"\n>>> 虚拟分卷完成 <<<")
+    state["phase"] = "novel_outline"
+    _save_resegment_state(outlines_dir, state)
+    if not state.get("novel_outline_done"):
+        if not extract_novel_outline(new_volume_outlines, llm, outlines_dir, force=True):
+            raise RuntimeError("重新汇总参考小说完整大纲失败。")
+        state["novel_outline_done"] = True
+        _save_resegment_state(outlines_dir, state)
+    state["phase"] = "complete"
+    _save_resegment_state(outlines_dir, state)
+    shutil.rmtree(all_batch_dir, ignore_errors=True)
+    print("\n>>> 虚拟分卷完成 <<<")
     print(f"  卷纲汇总：{volume_outline_path}")
+    return True
 
 def _ensure_full_coverage(virtual_volumes, total_ch):
     """确保虚拟卷覆盖全部章节范围：首卷从1开始，末卷到 total_ch 结束，中间无间隙。"""

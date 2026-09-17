@@ -55,11 +55,16 @@ CONFIG_KEYS = [
     "ADAPTIVE_BUILDER_LITE_BASE_URL",
     "ADAPTIVE_BUILDER_LITE_API_KEY",
     "ADAPTIVE_BUILDER_LITE_WIRE_API",
+    "HUMANIZE_BUILDER_MODEL",
+    "HUMANIZE_BUILDER_BASE_URL",
+    "HUMANIZE_BUILDER_API_KEY",
+    "HUMANIZE_BUILDER_WIRE_API",
 ]
 CONFIG_GROUPS = {
     "data_builder": ("参考拆解模型", "DATA_BUILDER"),
     "adaptive_builder": ("全书设计与舞台设计模型（推荐 Pro）", "ADAPTIVE_BUILDER"),
     "adaptive_builder_lite": ("故事情节、章纲与正文模型（推荐 Flash）", "ADAPTIVE_BUILDER_LITE"),
+    "humanize_builder": ("正文自然化精修模型（可选；留空沿用正文模型）", "HUMANIZE_BUILDER"),
 }
 
 
@@ -419,6 +424,40 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
     def list_workspaces() -> dict[str, Any]:
         return {"workspace_root": str(runtime.store.root), "items": runtime.store.list_workspaces()}
 
+    @app.get("/api/reference-library")
+    def reference_library(current: str = Query(default="")) -> dict[str, Any]:
+        try:
+            return {"items": runtime.store.reference_library(current or None)}
+        except ValueError as exc:
+            raise _http_error(exc) from exc
+
+    @app.delete("/api/workspaces/{name}/reference-analysis")
+    def clear_reference_analysis(name: str) -> dict[str, Any]:
+        try:
+            runtime.store.summary(name)
+            if runtime.workspace_has_active_work(name):
+                raise ValueError("该工作区仍有生成任务正在执行或暂停，请先结束任务再清除参考拆解结果。")
+            return runtime.store.clear_reference_analysis(name)
+        except FileNotFoundError as exc:
+            raise _http_error(ValueError("工作区不存在。"), 404) from exc
+        except ValueError as exc:
+            raise _http_error(exc) from exc
+
+    @app.post("/api/workspaces/{name}/reference-analysis/apply")
+    def apply_reference_analysis(name: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        source_workspace = str(payload.get("source_workspace") or "").strip()
+        try:
+            runtime.store.summary(name)
+            if runtime.workspace_has_active_work(name):
+                raise ValueError("该工作区仍有生成任务正在执行或暂停，请先结束任务再应用历史参考拆解。")
+            if runtime.workspace_has_active_work(source_workspace):
+                raise ValueError("所选历史工作区当前仍有生成任务，请等待它结束后再复用拆解结果。")
+            return runtime.store.apply_reference_from_workspace(name, source_workspace)
+        except FileNotFoundError as exc:
+            raise _http_error(ValueError("工作区不存在。"), 404) from exc
+        except ValueError as exc:
+            raise _http_error(exc) from exc
+
     @app.get("/api/workspaces/{name}")
     def workspace_summary(name: str) -> dict[str, Any]:
         try:
@@ -464,6 +503,29 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
                 raise ValueError("保存内容必须是文本。")
             runtime.store.write_file(name, path, content)
             return {"saved": True}
+        except ValueError as exc:
+            raise _http_error(exc) from exc
+
+    @app.get("/api/workspaces/{name}/chapter/export")
+    def export_chapter_file(name: str, path: str = Query(...)) -> FileResponse:
+        try:
+            chapter_path = runtime.store.chapter_file_path(name, path)
+            return FileResponse(
+                chapter_path,
+                media_type="text/markdown; charset=utf-8",
+                filename=chapter_path.name,
+            )
+        except FileNotFoundError as exc:
+            raise _http_error(ValueError("章节文件不存在。"), 404) from exc
+        except ValueError as exc:
+            raise _http_error(exc) from exc
+
+    @app.post("/api/workspaces/{name}/chapter/reveal")
+    def reveal_chapter_file(name: str, payload: dict[str, Any] = Body(...)) -> dict[str, str]:
+        try:
+            return runtime.store.reveal_chapter_file(name, str(payload.get("path") or ""))
+        except FileNotFoundError as exc:
+            raise _http_error(ValueError("章节文件不存在。"), 404) from exc
         except ValueError as exc:
             raise _http_error(exc) from exc
 
@@ -686,6 +748,7 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
                 arc_idx,
                 str(payload.get("message") or ""),
                 humanize=payload.get("humanize") is not False,
+                humanize_strength=str(payload.get("humanize_strength") or "standard"),
             )
         except Exception as exc:
             raise _http_error(exc) from exc

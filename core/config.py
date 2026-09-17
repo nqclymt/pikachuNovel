@@ -71,3 +71,8 @@ class ConfigLoader:
     def get_adaptive_builder_lite_config(cls):
         """故事情节、章纲、正文及轻量辅助任务配置（推荐 flash 模型）。"""
         return cls._build_config("ADAPTIVE_BUILDER_LITE")
+
+    @classmethod
+    def get_humanize_builder_config(cls):
+        """Naturalization refinement model; caller falls back to the drafting model when unset."""
+        return cls._build_config("HUMANIZE_BUILDER")

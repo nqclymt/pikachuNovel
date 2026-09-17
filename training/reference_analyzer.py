@@ -1,4 +1,4 @@
-"""可恢复的参考小说三阶段拆解：单章卡 -> 故事片段 -> 全书结构。"""
+"""可恢复的参考小说四阶段拆解：单章卡 -> 人工文笔库 -> 故事片段 -> 全书结构。"""
 
 from __future__ import annotations
 
@@ -130,6 +130,7 @@ class ReferenceAnalyzer:
         self.cards_index_path = self.output_dir / "chapter_cards_index.json"
         self.state_path = self.output_dir / "analysis_state.json"
         self.outlines_dir = self.output_dir / "outlines"
+        self.style_dir = self.output_dir / "style_library"
         self.state: dict[str, Any] = {}
 
     def run(self) -> dict[str, Any]:
@@ -150,12 +151,28 @@ class ReferenceAnalyzer:
         if self.state.get("resegmented") and not self.rebuild:
             completed_target = previous_target
             if target <= completed_target:
-                print("  已完成参考拆解并执行智能分卷，复用现有分卷结果。")
+                print("  已完成参考剧情拆解并执行智能分卷，复用现有分卷结果。")
                 cards = self.state.get("chapter_cards") or {}
+                from training.human_style_library import build_human_style_library
+                print("\n--- 独立补齐：人工文笔库 ---")
+                style_status = build_human_style_library(
+                    self.txt_path, self.output_dir, chapters=chapters,
+                    max_chapters=completed_target, llm=self.llm, force=False,
+                )
+                self.state["human_style_library"] = {
+                    "version": style_status.get("version", 0),
+                    "ready": bool(style_status.get("ready")),
+                    "sample_count": int(style_status.get("sample_count") or 0),
+                    "chapter_count": int(style_status.get("chapter_count") or 0),
+                }
+                self.state["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                _write_json(self.state_path, self.state)
                 return {
                     "target_chapters": completed_target,
                     "total_chapters": total_chapters,
                     "chapter_card_count": int(cards.get("complete_count") or 0),
+                    "style_sample_count": int(style_status.get("sample_count") or 0),
+                    "style_library_ready": bool(style_status.get("ready")),
                     "segmented_chapter_count": completed_target,
                     "pending_chapter_count": 0,
                     "structure_updated": False,
@@ -165,7 +182,7 @@ class ReferenceAnalyzer:
         self.previous_target = previous_target
         volume_specs = self._build_volume_specs(volumes, chapters, target)
 
-        print(f">>> 参考小说三阶段拆解启动 <<<")
+        print(f">>> 参考小说四阶段拆解启动 <<<")
         print(f"  单章事实卡：目标第 1-{target}/{total_chapters} 章，并发上限 {self.max_workers}")
         cards = self._extract_missing_cards(volume_specs, source_digest)
         self._write_card_index(cards, target, total_chapters)
@@ -179,10 +196,25 @@ class ReferenceAnalyzer:
         self.state["updated_at"] = datetime.now().isoformat(timespec="seconds")
         _write_json(self.state_path, self.state)
 
-        print("\n--- 阶段二：基于事实卡滚动提取故事片段 ---")
+        print("\n--- 阶段二：构建人工文笔库（连续样本 + 作者文笔画像）---")
+        from training.human_style_library import build_human_style_library
+        style_status = build_human_style_library(
+            self.txt_path, self.output_dir, chapters=chapters, cards=cards,
+            max_chapters=target, llm=self.llm, force=self.rebuild,
+        )
+        self.state["human_style_library"] = {
+            "version": style_status.get("version", 0),
+            "ready": bool(style_status.get("ready")),
+            "sample_count": int(style_status.get("sample_count") or 0),
+            "chapter_count": int(style_status.get("chapter_count") or 0),
+        }
+        self.state["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        _write_json(self.state_path, self.state)
+
+        print("\n--- 阶段三：基于事实卡滚动提取故事片段 ---")
         segment_stats = self._extract_story_segments(volume_specs, cards)
 
-        print("\n--- 阶段三：基于已闭合片段梳理结构 ---")
+        print("\n--- 阶段四：基于已闭合片段梳理结构 ---")
         structure_stats = self._build_structures(volume_specs, target, total_chapters)
 
         self.state["target_chapters"] = target
@@ -199,6 +231,8 @@ class ReferenceAnalyzer:
             "target_chapters": target,
             "total_chapters": total_chapters,
             "chapter_card_count": len(cards),
+            "style_sample_count": int(style_status.get("sample_count") or 0),
+            "style_library_ready": bool(style_status.get("ready")),
             "segmented_chapter_count": segment_stats["segmented_chapter_count"],
             "pending_chapter_count": segment_stats["pending_chapter_count"],
             "structure_updated": structure_stats["updated"],
@@ -306,6 +340,7 @@ class ReferenceAnalyzer:
     def _clear_derived_assets(self) -> None:
         shutil.rmtree(self.cards_dir, ignore_errors=True)
         shutil.rmtree(self.outlines_dir, ignore_errors=True)
+        shutil.rmtree(self.style_dir, ignore_errors=True)
         self.cards_index_path.unlink(missing_ok=True)
         self.state_path.unlink(missing_ok=True)
 
@@ -867,7 +902,7 @@ def run_reference_analysis(
     resume: bool = False,
     rebuild: bool = False,
 ) -> dict[str, Any]:
-    """CLI 入口：使用参考拆解模型运行新的三阶段分析。"""
+    """CLI 入口：使用参考拆解模型运行新的四阶段分析。"""
     config = ConfigLoader.get_data_builder_config()
     if not config.get("api_key"):
         config["api_key"] = os.getenv("OPENAI_API_KEY")

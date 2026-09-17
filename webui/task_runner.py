@@ -31,6 +31,7 @@ TASK_LABELS = {
     "workspace_init": "创建工作区",
     "init": "初始化并拆解参考小说",
     "reference_resume": "继续拆解参考小说",
+    "reference_style": "提炼人工文笔库",
     "world_import": "导入并构建目标世界资料库",
     "world_build": "构建目标世界资料库",
     "novel_outline": "设计核心玩法与全书舞台",
@@ -129,6 +130,117 @@ class WorkspaceStore:
             })
         return sorted(items, key=lambda item: item["updated_at"], reverse=True)
 
+    def reference_library(self, current_workspace: str | None = None) -> list[dict[str, Any]]:
+        """列出可复用的参考小说拆解资产，包含完整和可续拆状态。"""
+        current = require_workspace_name(current_workspace) if current_workspace else None
+        items: list[dict[str, Any]] = []
+        if not self.root.exists():
+            return items
+        for path in self.root.iterdir():
+            if not path.is_dir() or path.name.startswith(".") or not valid_workspace_name(path.name):
+                continue
+            if current and path.name == current:
+                continue
+            try:
+                summary = self.summary(path.name)
+            except (FileNotFoundError, ValueError, OSError):
+                continue
+            reference = summary.get("reference") or {}
+            processed = int(reference.get("processed_chapter_count") or 0)
+            chapter_cards = int(reference.get("chapter_card_count") or 0)
+            story_arcs = int(reference.get("story_arc_count") or 0)
+            if not reference.get("has_sample") or max(processed, chapter_cards, story_arcs) <= 0:
+                continue
+            complete = bool(reference.get("is_complete"))
+            items.append({
+                "workspace": path.name,
+                "source_name": str(reference.get("source_name") or "sample_novel.txt"),
+                "chapter_count": max(processed, chapter_cards),
+                "total_chapter_count": int(reference.get("total_chapter_count") or max(processed, chapter_cards) or 0),
+                "story_arc_count": story_arcs,
+                "is_complete": complete,
+                "reuse_status": "complete" if complete else "resumable",
+                "updated_at": datetime.fromtimestamp((path / "reference").stat().st_mtime).isoformat(timespec="seconds"),
+            })
+        return sorted(items, key=lambda item: item["updated_at"], reverse=True)
+
+    def clear_reference_analysis(self, name: str) -> dict[str, Any]:
+        """仅清除参考小说拆解派生资产，保留 sample_novel.txt 原始参考小说。"""
+        base = self.workspace_path(name)
+        if not base.is_dir():
+            raise FileNotFoundError(name)
+        reference = base / "reference"
+        sample = reference / "sample_novel.txt"
+        if not sample.is_file():
+            raise ValueError("当前工作区没有参考小说源文件。")
+        removed = 0
+        for dirname in ("chapters", "chapter_cards", "outlines", "style_library"):
+            target = reference / dirname
+            if target.is_dir():
+                removed += sum(1 for item in target.rglob("*") if item.is_file())
+                shutil.rmtree(target)
+        for filename in ("chapter_cards_index.json", "analysis_state.json", "import_state.json"):
+            target = reference / filename
+            if target.is_file():
+                target.unlink()
+                removed += 1
+        # 保留必要目录，避免后续流程依赖目录存在。
+        (reference / "chapters").mkdir(parents=True, exist_ok=True)
+        (reference / "outlines").mkdir(parents=True, exist_ok=True)
+        return {"cleared": True, "removed_file_count": removed, "source_preserved": True}
+
+    def apply_reference_from_workspace(self, target_name: str, source_name: str) -> dict[str, Any]:
+        """把另一个工作区已完成的 reference 资产完整复制到当前工作区。"""
+        target_name = require_workspace_name(target_name)
+        source_name = require_workspace_name(source_name)
+        if target_name == source_name:
+            raise ValueError("不能从当前工作区复用自身参考拆解。")
+        target = self.workspace_path(target_name)
+        source = self.workspace_path(source_name)
+        if not target.is_dir():
+            raise FileNotFoundError(target_name)
+        if not source.is_dir():
+            raise FileNotFoundError(source_name)
+        source_summary = self.summary(source_name).get("reference") or {}
+        processed = int(source_summary.get("processed_chapter_count") or 0)
+        chapter_cards = int(source_summary.get("chapter_card_count") or 0)
+        story_arcs = int(source_summary.get("story_arc_count") or 0)
+        if not source_summary.get("has_sample") or max(processed, chapter_cards, story_arcs) <= 0:
+            raise ValueError("所选历史工作区没有可复用的参考拆解产物。")
+        source_reference = source / "reference"
+        target_reference = target / "reference"
+        temporary = target / f".reference-copy-{uuid.uuid4().hex[:8]}"
+        backup = target / f".reference-backup-{uuid.uuid4().hex[:8]}"
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        if backup.exists():
+            shutil.rmtree(backup)
+        try:
+            shutil.copytree(source_reference, temporary)
+            if target_reference.exists():
+                target_reference.replace(backup)
+            temporary.replace(target_reference)
+            if backup.exists():
+                shutil.rmtree(backup, ignore_errors=True)
+        except Exception:
+            if target_reference.exists() and backup.exists():
+                shutil.rmtree(target_reference, ignore_errors=True)
+            if backup.exists() and not target_reference.exists():
+                backup.replace(target_reference)
+            raise
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary, ignore_errors=True)
+            if backup.exists():
+                shutil.rmtree(backup, ignore_errors=True)
+        return {
+            "applied": True,
+            "source_workspace": source_name,
+            "source_name": str(source_summary.get("source_name") or "sample_novel.txt"),
+            "chapter_count": max(processed, chapter_cards),
+            "is_complete": bool(source_summary.get("is_complete")),
+        }
+
     def delete_workspace(self, name: str) -> dict[str, Any]:
         """删除一个明确位于工作区根目录内的工作空间。"""
         safe_name = require_workspace_name(name)
@@ -196,6 +308,8 @@ class WorkspaceStore:
         ref_arcs = self._count_files(reference / "outlines", {".md"}, "story_arcs")
         reference_state = self._load_json(reference / "import_state.json") or {}
         analysis_state = self._load_json(reference / "analysis_state.json") or {}
+        from training.human_style_library import human_style_library_status
+        style_library = human_style_library_status(reference)
         card_state = analysis_state.get("chapter_cards") if isinstance(analysis_state, dict) else {}
         card_state = card_state if isinstance(card_state, dict) else {}
         card_count = int(card_state.get("complete_count") or 0)
@@ -212,13 +326,26 @@ class WorkspaceStore:
         if total_chapters:
             processed_chapters = min(processed_chapters, total_chapters)
             arc_progress = min(arc_progress, total_chapters)
+        state_complete = reference_state.get("analysis_complete", reference_state.get("is_complete"))
         reference_analysis_complete = (
-            bool(reference_state.get("is_complete"))
+            bool(state_complete)
             if reference_state
             else bool(sample.exists() and ref_chapters > 0)
         )
-        # 参考小说拆解只产出全书大纲、卷纲和故事片段。
-        # 旧流程的参考世界观不再影响拆解完成状态。
+        # 结构化分卷独立于基础拆解：事实卡/故事片段已齐时，分卷失败不能把整本判成未完成。
+        resegment_state = self._load_json(reference / "outlines" / "resegment_state.json") or {}
+        volume_dirs = [
+            path for path in (reference / "outlines").glob("vol_*_*") if path.is_dir()
+        ] if (reference / "outlines").is_dir() else []
+        has_fullbook_volume = any("全书" in path.name for path in volume_dirs)
+        stored_structure_complete = reference_state.get("structure_complete") if reference_state else None
+        if stored_structure_complete is None:
+            reference_structure_complete = bool(
+                (isinstance(resegment_state, dict) and resegment_state.get("phase") == "complete")
+                or (len(volume_dirs) > 1 and not has_fullbook_volume)
+            )
+        else:
+            reference_structure_complete = bool(stored_structure_complete)
         reference_complete = reference_analysis_complete
         manifest = self._load_json(fs / "world_knowledge" / "manifest.json") or {}
         source_records = manifest.get("sources", []) if isinstance(manifest.get("sources", []), list) else []
@@ -272,6 +399,13 @@ class WorkspaceStore:
             r"(?m)^#{1,6}\s*(?:第\s*)?阶段\s*0*\d+\b",
             stage_outline_text,
         ))
+        reference_volume_count = len(volume_dirs) if reference_structure_complete else 0
+        reference_structure_mismatch = bool(
+            reference_structure_complete
+            and reference_volume_count > 0
+            and stage_outline_count > 0
+            and reference_volume_count != stage_outline_count
+        )
         stage_assets_exist = all(item["done"] for item in stage_assets)
         stage_ready = stage_assets_exist and (
             not stage_outline_count or stage_count == stage_outline_count
@@ -356,12 +490,26 @@ class WorkspaceStore:
                 "chapter_count": ref_chapters,
                 "story_arc_count": ref_arcs,
                 "chapter_card_count": card_count,
+                "style_library_ready": bool(style_library.get("ready")),
+                "style_profile_ready": bool(style_library.get("advanced_profile_ready")),
+                "style_profile_mode": str(style_library.get("profile_mode") or "missing"),
+                "style_sample_count": int(style_library.get("sample_count") or 0),
+                "style_scene_example_count": int(style_library.get("scene_example_count") or style_library.get("sample_count") or 0),
+                "style_engine": str(style_library.get("engine") or ""),
+                "style_pipeline_revision": int(style_library.get("pipeline_revision") or 0),
+                "style_needs_rebuild": bool(style_library.get("needs_rebuild")),
+                "style_library_chapter_count": int(style_library.get("chapter_count") or 0),
+                "style_library_updated_at": str(style_library.get("updated_at") or ""),
                 "segmented_chapter_count": arc_progress,
                 "source_name": (reference_state.get("source_name") or sample.name) if sample.exists() else "",
                 "source_encoding": reference_state.get("source_encoding") or "",
                 "processed_chapter_count": processed_chapters,
                 "total_chapter_count": total_chapters,
                 "analysis_complete": reference_analysis_complete,
+                "structure_complete": reference_structure_complete,
+                "structure_phase": str(resegment_state.get("phase") or "") if isinstance(resegment_state, dict) else "",
+                "needs_structure_resume": bool(reference_analysis_complete and not reference_structure_complete),
+                "volume_count": reference_volume_count,
                 "is_complete": reference_complete,
             },
             "world_knowledge": {
@@ -397,6 +545,9 @@ class WorkspaceStore:
                 "reference_baseline_chapters": design_baseline,
                 "new_reference_chapter_count": new_reference_chapters,
                 "unused_reference_chapter_count": unused_reference_chapters,
+                "reference_structure_mismatch": reference_structure_mismatch,
+                "reference_volume_count": reference_volume_count,
+                "stage_outline_count": stage_outline_count,
                 "concept_revision": concept_revision,
                 "stage_synced_concept_revision": stage_synced_revision,
                 "stage_sync_pending": stage_sync_pending,
@@ -487,6 +638,27 @@ class WorkspaceStore:
             raise ValueError("文件超过 1.5MB，工作台不直接打开；请使用本地编辑器查看。")
         content = read_text_file(path)[0]
         return {"path": path.relative_to(self.workspace_path(name)).as_posix(), "content": content, "size": size}
+
+    def chapter_file_path(self, name: str, relative_path: str) -> Path:
+        """Resolve one generated chapter file while keeping access inside the workspace."""
+        normalized = str(relative_path or "").replace("\\", "/")
+        if not normalized.startswith("file_system/chapters/") or not normalized.lower().endswith(".md"):
+            raise ValueError("只能导出或定位已生成的章节正文。")
+        path = self._safe_file_path(name, normalized)
+        if not path.is_file():
+            raise FileNotFoundError(relative_path)
+        return path
+
+    def reveal_chapter_file(self, name: str, relative_path: str) -> dict[str, str]:
+        """Open Windows Explorer and select the generated chapter file."""
+        path = self.chapter_file_path(name, relative_path)
+        if os.name != "nt":
+            raise ValueError("定位文件功能当前仅支持 Windows 桌面版。")
+        subprocess.Popen(
+            ["explorer.exe", f"/select,{path}"],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return {"revealed": "true", "path": str(path)}
 
     def write_file(self, name: str, relative_path: str, content: str) -> None:
         path = self._safe_file_path(name, relative_path)
@@ -1115,6 +1287,15 @@ class TaskManager:
                 command += ["--max-chapters", str(max_chapters)]
             if args.get("rebuild_reference"):
                 command.append("--rebuild-reference")
+            return command
+
+        if task_type == "reference_style":
+            command += ["reference-style", workspace]
+            max_chapters = _positive_int(args.get("max_chapters"), "文笔库章节数", None)
+            if max_chapters:
+                command += ["--max-chapters", str(max_chapters)]
+            if force:
+                command.append("--force")
             return command
 
         if task_type == "world_import":

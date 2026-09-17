@@ -45,7 +45,14 @@ try {
     }
 
     $Index = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/" -TimeoutSec 5
-    $Asset = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/assets/app.js" -TimeoutSec 5
+    $Asset = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/assets/wizard-v0.js" -TimeoutSec 5
+    if (-not $Asset.Content.Contains("human_style_pipeline_revision")) {
+        throw "The frozen desktop served stale wizard assets without the style-pipeline status."
+    }
+    $Presets = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/assets/workflow-presets.js" -TimeoutSec 5
+    if (-not $Index.Content.Contains("/assets/workflow-presets.js") -or -not $Presets.Content.Contains("WorkflowPromptPresets")) {
+        throw "The frozen desktop is missing the workflow preset module."
+    }
     $Update = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/update-check" -TimeoutSec 8
     if (-not $Update.current_version -or -not $Update.latest_version) {
         throw "Frozen update-check endpoint returned incomplete version metadata."
@@ -86,6 +93,8 @@ try {
         IndexBytes = $Index.RawContentLength
         AssetStatus = $Asset.StatusCode
         AssetBytes = $Asset.RawContentLength
+        PresetStatus = $Presets.StatusCode
+        PresetBytes = $Presets.RawContentLength
         UpdateCurrentVersion = $Update.current_version
         UpdateLatestVersion = $Update.latest_version
         TaskStatus = $Task.status

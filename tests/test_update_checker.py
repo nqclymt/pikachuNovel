@@ -16,9 +16,9 @@ class _Response:
     def read(self):
         return json.dumps(
             {
-                "tag_name": "v2.1.0",
-                "name": "PikachuNovel v2.1.0",
-                "html_url": "https://github.com/nqclymt/pikachuNovel/releases/tag/v2.1.0",
+                "tag_name": "v2.2.0",
+                "name": "PikachuNovel v2.2.0",
+                "html_url": "https://github.com/nqclymt/pikachuNovel/releases/tag/v2.2.0",
                 "published_at": "2026-08-25T00:00:00Z",
                 "draft": False,
                 "prerelease": False,
@@ -36,8 +36,8 @@ class UpdateCheckerTests(unittest.TestCase):
             result = check_latest_release()
 
         self.assertTrue(result["update_available"])
-        self.assertEqual(result["latest_version"], "2.1.0")
-        self.assertIn("releases/tag/v2.1.0", result["release_url"])
+        self.assertEqual(result["latest_version"], "2.2.0")
+        self.assertIn("releases/tag/v2.2.0", result["release_url"])
 
     def test_network_failure_is_non_fatal(self):
         with patch("webui.update_checker.urllib.request.urlopen", side_effect=OSError("offline")):
