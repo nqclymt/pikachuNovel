@@ -519,6 +519,8 @@ def fallback_scene_plan(chapter_outline: str, story_arc: str = "", instruction: 
         scenes.append({
             "scene": index,
             "scene_goal": block[:500],
+            "required_events": [],
+            "background_constraints": [],
             "character_goals": {},
             "conflict": block[:300] if metadata["conflict_level"] != "low" else "",
             "new_information": [],
@@ -575,6 +577,8 @@ def plan_chapter_scenes(llm: Any, chapter_outline: str, story_arc: str = "", rec
             query = normalize_scene_query(item)
             normalized.append({
                 "scene": index, "scene_goal": item["scene_goal"].strip()[:800],
+                "required_events": _text_list(item.get("required_events")),
+                "background_constraints": _text_list(item.get("background_constraints")),
                 "character_goals": {str(k)[:80]: str(v)[:500] for k, v in list(item.get("character_goals", {}).items())[:20]} if isinstance(item.get("character_goals"), dict) else {},
                 "conflict": str(item.get("conflict") or "").strip()[:600],
                 "new_information": _text_list(item.get("new_information")),

@@ -57,6 +57,14 @@ class StyleEngineReviewTests(unittest.TestCase):
         self.assertEqual(result[0]["planner_source"], "llm")
         self.assertEqual(result[0]["hidden_information"], ["来客的真实来意"])
 
+    def test_scene_plan_keeps_events_separate_from_background(self):
+        payload = json.loads(json.dumps(PLAN))
+        payload["scenes"][0].update(required_events=["客人提出借书，主人拒绝。"],
+                                    background_constraints=["主人欠客人人情。"])
+        result = engine.plan_chapter_scenes(RecordingLLM(payload), OUTLINE)
+        self.assertEqual(result[0]["required_events"], ["客人提出借书，主人拒绝。"])
+        self.assertEqual(result[0]["background_constraints"], ["主人欠客人人情。"])
+
     def test_template_error_is_not_hidden_as_fallback(self):
         llm = RecordingLLM()
         with patch.object(PromptLoader, "load", side_effect=KeyError("broken template")):
@@ -226,6 +234,8 @@ class StyleEngineReviewTests(unittest.TestCase):
                 llm.calls.append(prompt)
                 if "你是长篇小说的 Scene Planner" in prompt:
                     return json.dumps(PLAN, ensure_ascii=False)
+                if "你是中文小说的编辑审读者" in prompt:
+                    return '{"issues":[]}'
                 if "Chinese commercial-fiction line editor" in prompt:
                     return '{"replacements":[]}'
                 return prose
@@ -249,12 +259,20 @@ class StyleEngineReviewTests(unittest.TestCase):
             self.assertIn("dialogue.subtext", writer)
             self.assertIn("目标 Scene 1 的写法案例", writer)
             self.assertNotIn("战斗动作使用", writer)
+            self.assertIn("背景无需逐条写出", writer)
+            self.assertIn("可自由组织", writer)
+            editor = next(p for p in llm.calls if "你是中文小说的编辑审读者" in p)
+            self.assertIn(OUTLINE, editor.replace("\r\n", "\n"))
             self.assertTrue((fs / "drafts/vol_01/raw_chapters/001_第1章.raw.md").exists())
             traces = list((fs / "drafts/vol_01/style_traces").glob("*.json"))
             trace = json.loads(traces[0].read_text(encoding="utf-8"))
             self.assertEqual(trace["planner_sources"], ["llm"])
             self.assertLessEqual(trace["style_context_chars"], 18000)
             self.assertTrue(trace["retrieval"][0]["examples"])
+            reviews = list((fs / "drafts/vol_01/editor_reviews").glob("*.json"))
+            report = json.loads(reviews[0].read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "no_changes")
+            self.assertEqual(report["input_sha256"], report["output_sha256"])
 
 
 if __name__ == "__main__":

@@ -43,6 +43,24 @@ class ChapterFileActionTests(unittest.TestCase):
         self.assertEqual(args[0], "explorer.exe")
         self.assertTrue(args[1].startswith("/select,"))
 
+    def test_reveal_chapter_uses_finder_selection_on_macos(self):
+        with mock.patch("webui.task_runner.sys.platform", "darwin"), mock.patch(
+            "webui.task_runner.subprocess.Popen"
+        ) as popen:
+            result = self.store.reveal_chapter_file(
+                self.workspace, "file_system/chapters/vol_01/001_第1章.md"
+            )
+        popen.assert_called_once_with(["/usr/bin/open", "-R", str(self.chapter.resolve())])
+        self.assertEqual(result["revealed"], "true")
+
+    def test_finder_does_not_open_files_outside_workspace(self):
+        with mock.patch("webui.task_runner.sys.platform", "darwin"), mock.patch(
+            "webui.task_runner.subprocess.Popen"
+        ) as popen:
+            with self.assertRaises(ValueError):
+                self.store.reveal_chapter_file(self.workspace, "../outside.md")
+        popen.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -48,6 +48,7 @@ from training.style_engine_v2 import (
     build_scene_style_context,
     plan_chapter_scenes,
 )
+from training.prose_editor import edit_chapter_prose
 
 BATCH_SIZE = 20
 STORY_ARC_FILE_RE = re.compile(r'^arc_(\d+)_ch(\d+)_(\d+)\.md$')
@@ -5735,26 +5736,42 @@ def _humanize_chapter_text(
     strength="standard",
     style_profile=None,
     style_anchor="",
+    chapter_outline="",
+    story_arc="",
+    recent_context="",
 ):
     _backup_raw_chapter(ws, volume, chapter_num, chapter_text)
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    profile = dict(style_profile or _effective_style_profile(ws))
     library_ready = human_style_library_status(ws.reference).get("ready", False)
-    if library_ready:
-        profile["human_style_library"] = True
     writing_guide = _read_file(os.path.join(ws.file_system, "writing", "system_prompt.md")) or ""
     if not writing_guide and not library_ready:
         writing_guide = _read_file(os.path.join(project_root, "core", "system_prompt.md")) or ""
     writing_guide = writing_guide or "Preserve the supplied scene examples' narrative mechanics and all story facts."
-    result, applied = _naturalize_chapter_locally(
-        llm, chapter_text, profile, writing_guide,
-        strength=strength, style_anchor=style_anchor, cancel_event=cancel_event,
+    result, report = edit_chapter_prose(
+        llm, chapter_text, chapter_outline=chapter_outline, story_arc=story_arc,
+        recent_context=recent_context, writing_guide=writing_guide,
+        strength=strength, style_anchor=style_anchor or _reference_style_profile_text(
+            style_profile or _effective_style_profile(ws)
+        ), cancel_event=cancel_event,
     )
+    trace_path = os.path.join(
+        ws.file_system, "drafts", f"vol_{volume:02d}", "editor_reviews",
+        f"chapter_{chapter_num:03d}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json",
+    )
+    report.update(chapter=chapter_num, volume=volume)
+    _write_generated_chapter(trace_path, json.dumps(report, ensure_ascii=False, indent=2))
+    applied = len(report["applied_edits"])
     if applied:
-        print(f"  -> Naturalization rewrote {applied} locally selected paragraphs.")
+        print(f"  -> 编辑审读：{len(report['issues'])} 处局部问题，{applied} 段修改通过验收。")
+    elif report["status"] == "no_changes":
+        print("  -> 编辑审读未发现需要局部修改的问题，保留原稿。")
+    elif report["status"].endswith("failed"):
+        print(f"  -> 警告：编辑审读/验收未完成（{report['reason']}），保留原稿；详情已记录。")
     else:
-        result = chapter_text
-        print("  -> Naturalization found no paragraph that required local rewriting.")
+        print("  -> 编辑审读没有可安全采纳的局部修改，保留原稿；详情已记录。")
+    if report["planning_issues"]:
+        print(f"  -> {len(report['planning_issues'])} 处问题需要调整情节或章纲，已记录，未在精修中改动剧情。")
+    print(f"     编辑审读记录：{trace_path}")
     # Do not follow a local edit with the legacy whole-chapter style repair. That erased the
     # reference voice and could discard an otherwise valid chapter for normal punctuation.
     return result
@@ -5935,13 +5952,16 @@ def gen_serial_chapters(
     else:
         print("  -> 人工文笔库尚未建立；本次暂时回退到旧的参考章节锚点。")
 
-    def humanize_with_controls(ch_num, text, completed, total, style_anchor=""):
+    def humanize_with_controls(ch_num, text, completed, total, style_anchor="",
+                               chapter_outline="", story_arc="", recent_context=""):
         while True:
             try:
                 return _humanize_chapter_text(
                     humanize_llm, ws, volume, ch_num, text,
                     cancel_event=cancel_event,
                     strength=humanize_strength,
+                    chapter_outline=chapter_outline, story_arc=story_arc,
+                    recent_context=recent_context,
                     style_profile=reference_style_profile,
                     style_anchor=style_anchor or _reference_anchor_prompt_text(
                         _aligned_reference_chapter_context(
@@ -6048,7 +6068,15 @@ def gen_serial_chapters(
                     ws, volume, ch_num - volume_first_chapter + 1, volume_chapter_count,
                 ),
             )
-            result = humanize_with_controls(ch_num, existing_text, idx, len(tasks), style_anchor=style_anchor)
+            existing_history = "\n\n".join(
+                _read_file(os.path.join(out_dir, f"{previous:03d}_第{previous}章.md")) or ""
+                for previous in range(max(1, ch_num - 2), ch_num)
+            )
+            result = humanize_with_controls(
+                ch_num, existing_text, idx, len(tasks), style_anchor=style_anchor,
+                chapter_outline=existing_outline, story_arc=existing_arc,
+                recent_context=existing_history,
+            )
             if result is None:
                 break
             if not style_library.get("ready"):
@@ -6178,7 +6206,7 @@ def gen_serial_chapters(
             f"=== 前序正文（仅用于承接，不得覆盖本章章纲）===\n{history_section}\n\n"
             + panel_section
             + current_draft_section
-            + f"=== 当前章章纲（第{ch_num}章，剧情唯一蓝图）===\n{chapter_outline}\n\n"
+            + f"=== 当前章章纲（第{ch_num}章，事件与事实依据；背景无需逐条写出）===\n{chapter_outline}\n\n"
             + (f"=== 用户本轮调整要求 ===\n{writing_instruction}\n\n" if writing_instruction else "")
             + "=== 最终执行提醒 ===\n"
             + "只输出本章标题和正文；按 Scene Plan 顺序完成章纲既定事件，但不要把 Scene Plan 写成小标题或提纲；"
@@ -6223,9 +6251,11 @@ def gen_serial_chapters(
             raise RuntimeError(f"第{ch_num}章模型返回空正文，未覆盖已有文件。")
         _backup_raw_chapter(ws, volume, ch_num, result)
         if humanize:
-            print(f"  第{ch_num}章正文局部精修中（使用同一批场景案例）...")
+            print(f"  第{ch_num}章正文编辑审读与局部精修中（使用同一批场景案例）...")
             result = humanize_with_controls(
                 ch_num, result, idx, len(tasks), style_anchor=reference_anchor_text + "\n\n" + scene_style_context,
+                chapter_outline=chapter_outline, story_arc=story_arc_summary,
+                recent_context=history_section,
             )
             if result is None:
                 break

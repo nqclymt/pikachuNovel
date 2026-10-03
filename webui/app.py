@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import threading
 import webbrowser
 from pathlib import Path
@@ -83,7 +84,8 @@ def _default_workspace_root() -> Path:
     if configured:
         return Path(configured).expanduser()
     documents_root = Path.home() / "Documents" / "my-novels"
-    if documents_root.exists():
+    # Finder 启动的 .app 工作目录不稳定，也可能处于只读磁盘映像内。
+    if sys.platform == "darwin" or documents_root.exists():
         return documents_root
     return Path.cwd() / "my-novels"
 

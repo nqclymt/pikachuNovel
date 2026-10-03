@@ -650,14 +650,17 @@ class WorkspaceStore:
         return path
 
     def reveal_chapter_file(self, name: str, relative_path: str) -> dict[str, str]:
-        """Open Windows Explorer and select the generated chapter file."""
+        """Select the generated chapter in the platform's file manager."""
         path = self.chapter_file_path(name, relative_path)
-        if os.name != "nt":
-            raise ValueError("定位文件功能当前仅支持 Windows 桌面版。")
-        subprocess.Popen(
-            ["explorer.exe", f"/select,{path}"],
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        if sys.platform == "darwin":
+            subprocess.Popen(["/usr/bin/open", "-R", str(path)])
+        elif os.name == "nt":
+            subprocess.Popen(
+                ["explorer.exe", f"/select,{path}"],
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        else:
+            raise ValueError("定位文件功能当前仅支持 Windows 和 macOS 桌面版。")
         return {"revealed": "true", "path": str(path)}
 
     def write_file(self, name: str, relative_path: str, content: str) -> None:

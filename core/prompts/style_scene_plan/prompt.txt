@@ -13,7 +13,7 @@
 {instruction}
 
 规则：
-1. 当前章章纲是剧情唯一蓝图，不新增章纲之外的重要事件。
+1. 当前章章纲确定剧情事实，不新增重要事件。required_events 只列本场实际发生的行动、选择、结果；background_constraints 只列必须保持成立的身份、能力、关系等背景，背景不等于需要写进正文的新事件。
 2. 每个 scene 必须有明确的 scene_goal；场景切分优先依据地点/时间/人物组合/核心目标/冲突阶段变化，而不是平均分字数。
 3. hidden_information 表示本场景故意不向读者完整公开的信息；new_information 表示本场景允许公开的信息。
 4. style_retrieval_query 必须从以下受控值中选择：
@@ -23,7 +23,7 @@
    plot_function: setup|development|escalation|reveal|payoff|transition|relationship
    information_function: implicit_progress|partial_reveal|full_reveal|foreshadowing|worldbuilding|character_state
    pacing: slow|medium|fast
-5. 不要写正文句子，不要复制参考小说内容。
+5. 不要写正文句子，不要复制参考小说内容。不要把“公开身份、长期愿望、情绪标签”等设计说明变成开场介绍或强制内心独白。日常、过渡和余波可以自然结束，不要求每场都有独立高潮、总结或悬念。
 6. 只返回合法 JSON，不要 Markdown。
 
 返回结构（所有场景必须有非空目标；不要把“故事线”“单章节奏”等栏目当作场景）：
@@ -31,6 +31,8 @@
   "scenes": [
     {{
       "scene_goal": "",
+      "required_events": [],
+      "background_constraints": [],
       "character_goals": {{}},
       "conflict": "",
       "new_information": [],

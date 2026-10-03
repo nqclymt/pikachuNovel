@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import socket
+import tempfile
 import threading
 import time
 from contextlib import closing
@@ -126,7 +127,7 @@ def main() -> None:
         try:
             from pathlib import Path
 
-            Path(os.getenv("TEMP", "."), "PikachuNovel-startup-error.log").write_text(
+            Path(tempfile.gettempdir(), "PikachuNovel-startup-error.log").write_text(
                 str(exc), encoding="utf-8"
             )
         except OSError:
