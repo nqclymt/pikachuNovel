@@ -614,7 +614,7 @@ function arcsChatPanelMarkup(volume, conversation, job = null) {
     ? `<select id="arcs-volume-select">${Array.from({ length: stageCount }, (_, i) => `<option value="${i + 1}" ${Number(volume) === i + 1 ? "selected" : ""}>第 ${i + 1} 舞台</option>`).join("")}</select>`
     : `<input id="arcs-volume-select" type="number" min="1" value="${volume}" />`;
   const volumeInfo = (wizardState.summary?.volumes || []).find((item) => Number(item.volume) === Number(volume));
-  const arcsExist = Boolean(conversation?.has_arcs) || Boolean(volumeInfo?.arcs?.length);
+  const arcsExist = Boolean(conversation?.has_arcs) || Boolean(volumeInfo?.arcs?.some((arc) => !arc.missing_story_arc));
   const placeholder = "描述对情节单元的调整要求，例如「情节单元1增加一个反转」「主角在情节单元3中实力突破」…";
   const messages = turns.map(chatMessageMarkup).join("");
   const busy = Boolean(job && ["running", "pausing", "paused", "stopping"].includes(job.status));
@@ -796,6 +796,28 @@ function chaptersVolumeDetails() {
   return volumes;
 }
 
+function chapterBatchLabel(batch) {
+  if (Number(batch.idx) === -1) return "未归属章节";
+  return `情节单元${batch.idx}${batch.title ? ` · ${batch.title}` : ""}${batch.missing_story_arc ? "（原情节已删除或为空）" : ""}`;
+}
+
+function chapterBatchRange(batch) {
+  if (!batch) return "当前批次";
+  if (!batch.missing_story_arc || !batch.chapters?.length) return `第 ${batch.start_ch}-${batch.end_ch} 章`;
+  const groups = [];
+  for (const chapter of batch.chapters) {
+    const last = groups[groups.length - 1];
+    if (last && chapter === last[1] + 1) last[1] = chapter;
+    else groups.push([chapter, chapter]);
+  }
+  return `第 ${groups.map(([start, end]) => start === end ? start : `${start}-${end}`).join("、")} 章`;
+}
+
+function selectedChapterBatch(volume, arcIdx) {
+  const arcs = (wizardState.summary?.volumes || []).find((v) => Number(v.volume) === Number(volume))?.arcs || [];
+  return arcs.find((arc) => Number(arc.idx) === Number(arcIdx))?.idx ?? arcs[0]?.idx ?? null;
+}
+
 function chaptersJobMarkup(job) {
   if (!job) return "";
   if (job.status === "idle" && job.can_resume) {
@@ -837,18 +859,20 @@ function chaptersChatPanelMarkup(volume, arcIdx, conversation, job = null) {
   const volumes = chaptersVolumeDetails();
   const volDetail = volumes.find((v) => v.volume === Number(volume)) || { arcs: [] };
   const arcs = volDetail.arcs || [];
+  const selected = arcs.find((arc) => Number(arc.idx) === Number(arcIdx));
+  const canGenerate = Boolean(selected && !selected.missing_story_arc);
   const volumeSelector = volumes.length
     ? `<select id="chapters-volume-select">${volumes.map((v) => `<option value="${v.volume}" ${Number(volume) === v.volume ? "selected" : ""}>第 ${v.volume} 舞台</option>`).join("")}</select>`
     : `<input id="chapters-volume-select" type="number" min="1" value="${volume}" />`;
   const arcSelector = arcs.length
-    ? `<select id="chapters-arc-select">${arcs.map((a) => `<option value="${a.idx}" ${Number(arcIdx) === a.idx ? "selected" : ""}>情节单元${a.idx}${a.title ? ` · ${escapeHtml(a.title)}` : ""}（第${a.start_ch}-${a.end_ch}章）</option>`).join("")}</select>`
+    ? `<select id="chapters-arc-select">${arcs.map((a) => `<option value="${a.idx}" ${Number(arcIdx) === a.idx ? "selected" : ""}>${escapeHtml(chapterBatchLabel(a))}（${chapterBatchRange(a)}）</option>`).join("")}</select>`
     : `<select id="chapters-arc-select" disabled><option>该舞台暂无情节单元</option></select>`;
   const turns = (conversation && Array.isArray(conversation.turns)) ? conversation.turns : [];
   const placeholder = "描述对本批章纲的调整要求，例如「第1章情绪基调更压抑」「第3章单章简介加强反转」…";
   const messages = turns.map(chatMessageMarkup).join("");
   const busy = Boolean(job && ["running", "pausing", "paused", "stopping"].includes(job.status));
   const resetBtn = (turns.length || conversation?.has_outlines) ? `<button id="reset-chapters-chat" class="chat-icon-btn" type="button" title="${busy ? "先结束当前生成任务，结束后即可删除已生成内容" : "删除当前情节单元已生成的章纲和系统面板"}" ${busy ? "disabled" : ""}>${busy ? "结束任务后可删除" : "删除本批产物"}</button>` : "";
-  const emptyHint = arcs.length ? "选择舞台和情节单元后，输入描述开始生成逐章章纲。" : "该舞台还没有故事情节单元，请先在「故事情节」步骤中生成。";
+  const emptyHint = selected?.missing_story_arc ? "原故事情节已删除或为空，保留的章纲仍可查看和删除；重新生成前请先恢复故事情节。" : arcs.length ? "选择舞台和情节单元后，输入描述开始生成逐章章纲。" : "该舞台还没有故事情节单元，请先在「故事情节」步骤中生成。";
   const panel = wizardState.systemPanelStatus || { selection_mode: "auto", decided: false, enabled: false };
   const panelResult = panel.unavailable
     ? "设置接口尚未加载，重启服务后可用"
@@ -871,12 +895,12 @@ function chaptersChatPanelMarkup(volume, arcIdx, conversation, job = null) {
     <div class="chat-scroll" id="chat-message-list">${messages || `<div class="chat-empty"><div class="chat-empty-icon">📝</div><p>${emptyHint}</p></div>`}</div>
     ${chaptersJobMarkup(job)}
     <div class="chat-composer">
-      ${WorkflowPromptPresets.markup("chapters", busy || job?.status === "queued" || !arcs.length)}
+      ${WorkflowPromptPresets.markup("chapters", busy || job?.status === "queued" || !canGenerate)}
       <div class="chat-input-row">
-        <textarea id="chapters-chat-input" class="chat-input" placeholder="${placeholder}" rows="1" ${busy || job?.status === "queued" || !arcs.length ? "disabled" : ""}></textarea>
-        <button id="send-chapters-chat" class="chat-send-btn" type="button" title="发送（Ctrl/⌘+Enter）" ${arcs.length ? "" : "disabled"}><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
+        <textarea id="chapters-chat-input" class="chat-input" placeholder="${placeholder}" rows="1" ${busy || job?.status === "queued" || !canGenerate ? "disabled" : ""}></textarea>
+        <button id="send-chapters-chat" class="chat-send-btn" type="button" title="发送（Ctrl/⌘+Enter）" ${canGenerate ? "" : "disabled"}><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
       </div>
-      <div class="chat-composer-meta">${resetBtn}</div>
+      <div class="chat-composer-meta">${selected?.missing_story_arc ? "<span>原情节缺失，保留内容可删除。</span>" : ""}${resetBtn}</div>
     </div>
   </section>`;
 }
@@ -935,18 +959,20 @@ function renderChaptersChat(volume, arcIdx, conversation, job = null) {
   });
   $$("[data-artifact-path]").forEach((btn) => btn.addEventListener("click", () => openReviewFile(btn.dataset.artifactPath)));
   $("#reset-chapters-chat")?.addEventListener("click", async () => {
-    if (!confirm(`将删除情节单元${arcIdx}（卷${volume}）的所有章纲、对应系统面板并清空对话。确认重置？`)) return;
+    const batch = chaptersVolumeDetails().find((v) => Number(v.volume) === Number(volume))?.arcs?.find((a) => Number(a.idx) === Number(arcIdx));
+    if (!confirm(`将删除卷 ${volume} ${chapterBatchRange(batch)}的章纲、对应系统面板并清空对话。确认重置？`)) return;
     try {
       await api(`/api/workspaces/${encodeURIComponent(wizardState.workspace)}/chapters/${volume}/${arcIdx}/reset`, { method: "POST", body: JSON.stringify({}) });
       await refreshWorkspaceArtifacts();
-      const data = await api(`/api/workspaces/${encodeURIComponent(wizardState.workspace)}/chapters/${volume}/${arcIdx}/conversation`);
-      renderChaptersChat(volume, arcIdx, data);
-      showToast("已重置，下一条消息将重新生成。");
+      await loadChaptersChat(volume, arcIdx);
+      showToast("本批章纲和对应系统面板已删除。");
     } catch (error) { showToast(error.message || "无法重置。", true); }
   });
 }
 
 async function loadChaptersChat(volume, arcIdx) {
+  arcIdx = selectedChapterBatch(volume, arcIdx);
+  wizardState.chaptersChatArc = arcIdx;
   if (!arcIdx) { renderChaptersChat(volume, 0, { turns: [] }); return; }
   try {
     const base = `/api/workspaces/${encodeURIComponent(wizardState.workspace)}/chapters/${volume}/${arcIdx}`;
@@ -1106,6 +1132,8 @@ function draftChatPanelMarkup(volume, arcIdx, conversation, job = null) {
   const detail = volumes.find((item) => Number(item.volume) === Number(volume)) || { arcs: [] };
   const arcs = detail.arcs || [], turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
   const guide = conversation?.writing_guide || {};
+  const selected = arcs.find((arc) => Number(arc.idx) === Number(arcIdx));
+  const canGenerate = Boolean(selected && !selected.missing_story_arc);
   const anchorStatus = guide.human_style_library
     ? `Style Engine v2 · 索引修订 ${Number(guide.human_style_pipeline_revision || 0)} · ${Number(guide.human_style_scene_example_count || guide.human_style_sample_count || 0)} 个场景案例 · ${guide.human_style_needs_rebuild ? "生成前将升级旧索引" : "已启用；规划成功/兜底请查看本次日志"}`
     : (guide.reference_anchor
@@ -1116,14 +1144,14 @@ function draftChatPanelMarkup(volume, arcIdx, conversation, job = null) {
     ? `<button id="reset-draft-chat" class="chat-icon-btn" type="button" title="${busy ? "先结束当前生成任务，结束后即可删除已生成正文" : "删除当前情节单元的全部正文并重新开始"}" ${busy ? "disabled" : ""}>${busy ? "结束任务后可删除" : "删除本批正文"}</button>`
     : "";
   const volumeSelector = `<select id="draft-chat-volume">${volumes.map((item) => `<option value="${item.volume}" ${Number(volume) === Number(item.volume) ? "selected" : ""}>第 ${item.volume} 舞台 / 卷</option>`).join("")}</select>`;
-  const arcSelector = arcs.length ? `<select id="draft-chat-arc">${arcs.map((arc) => `<option value="${arc.idx}" ${Number(arcIdx) === Number(arc.idx) ? "selected" : ""}>情节单元${arc.idx}${arc.title ? ` · ${escapeHtml(arc.title)}` : ""}（第${arc.start_ch}-${arc.end_ch}章）</option>`).join("")}</select>` : '<select id="draft-chat-arc" disabled><option>该舞台暂无故事情节</option></select>';
+  const arcSelector = arcs.length ? `<select id="draft-chat-arc">${arcs.map((arc) => `<option value="${arc.idx}" ${Number(arcIdx) === Number(arc.idx) ? "selected" : ""}>${escapeHtml(chapterBatchLabel(arc))}（${chapterBatchRange(arc)}）</option>`).join("")}</select>` : '<select id="draft-chat-arc" disabled><option>该舞台暂无故事情节</option></select>';
   const guideMode = guide.human_style_library
     ? (guide.custom ? "Style Engine v2 + 自定义显式约束" : "语言风格由 Style Engine v2 控制；默认规范不覆盖文风")
     : (guide.custom ? "当前使用自定义规范" : "当前使用项目默认 system_prompt.md");
   return `<section class="chat-panel draft-chat-panel"><header class="chat-panel-bar"><span class="chat-panel-bar-label">舞台 / 卷号</span>${volumeSelector}<span class="chat-panel-bar-label">故事情节</span>${arcSelector}</header>
     <div class="writing-guide-bar"><div><strong>生文规范</strong><span>${guideMode}</span><span class="reference-anchor-status ${guide.human_style_library || guide.reference_anchor ? "ready" : "missing"}">${anchorStatus}</span></div><div class="writing-guide-actions"><input id="draft-guide-file" type="file" accept=".txt,.md" hidden><button id="upload-draft-guide" class="chat-icon-btn" type="button">上传规范</button>${guide.custom ? '<button id="reset-draft-guide" class="chat-icon-btn" type="button">恢复默认</button>' : ""}</div></div>
-    <div class="chat-scroll" id="chat-message-list">${turns.map(chatMessageMarkup).join("") || `<div class="chat-empty"><div class="chat-empty-icon">✍</div><p>${arcs.length ? "输入本情节正文的生成要求，开始逐章串行创作。" : "请先生成故事情节和逐章章纲。"}</p></div>`}</div>${draftJobMarkup(job)}
-    <div class="chat-composer">${draftPromptPresetsMarkup(busy || job?.status === "queued" || !arcs.length)}<div class="chat-input-row"><textarea id="draft-chat-input" class="chat-input" rows="1" placeholder="输入正文生成或调整要求，也可以点上方快捷要求" ${busy || job?.status === "queued" || !arcs.length ? "disabled" : ""}></textarea><button id="send-draft-chat" class="chat-send-btn" type="button" title="发送（Ctrl/⌘+Enter）" aria-label="发送" ${arcs.length ? "" : "disabled"}><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button></div><div class="chat-composer-meta draft-chat-options"><label class="draft-humanize-option"><input id="draft-chat-humanize" type="checkbox" ${wizardState.draftChatHumanize === false ? "" : "checked"} /><span>生成后局部精修${guide.human_style_library ? "（沿用人工文笔库）" : ""}</span></label><label class="draft-humanize-strength"><span>强度</span><select id="draft-chat-humanize-strength" ${wizardState.draftChatHumanize === false ? "disabled" : ""}><option value="light" ${wizardState.draftChatHumanizeStrength === "light" ? "selected" : ""}>轻度</option><option value="standard" ${!wizardState.draftChatHumanizeStrength || wizardState.draftChatHumanizeStrength === "standard" ? "selected" : ""}>标准</option><option value="deep" ${wizardState.draftChatHumanizeStrength === "deep" ? "selected" : ""}>深度</option></select></label>${resetBtn}</div></div></section>`;
+    <div class="chat-scroll" id="chat-message-list">${turns.map(chatMessageMarkup).join("") || `<div class="chat-empty"><div class="chat-empty-icon">✍</div><p>${selected?.missing_story_arc ? "原故事情节已删除或为空，保留的正文仍可查看和删除。" : arcs.length ? "输入本情节正文的生成要求，开始逐章串行创作。" : "请先生成故事情节和逐章章纲。"}</p></div>`}</div>${draftJobMarkup(job)}
+    <div class="chat-composer">${draftPromptPresetsMarkup(busy || job?.status === "queued" || !canGenerate)}<div class="chat-input-row"><textarea id="draft-chat-input" class="chat-input" rows="1" placeholder="输入正文生成或调整要求，也可以点上方快捷要求" ${busy || job?.status === "queued" || !canGenerate ? "disabled" : ""}></textarea><button id="send-draft-chat" class="chat-send-btn" type="button" title="发送（Ctrl/⌘+Enter）" aria-label="发送" ${canGenerate ? "" : "disabled"}><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button></div><div class="chat-composer-meta draft-chat-options"><label class="draft-humanize-option"><input id="draft-chat-humanize" type="checkbox" ${wizardState.draftChatHumanize === false ? "" : "checked"} /><span>生成后局部精修${guide.human_style_library ? "（沿用人工文笔库）" : ""}</span></label><label class="draft-humanize-strength"><span>强度</span><select id="draft-chat-humanize-strength" ${wizardState.draftChatHumanize === false ? "disabled" : ""}><option value="light" ${wizardState.draftChatHumanizeStrength === "light" ? "selected" : ""}>轻度</option><option value="standard" ${!wizardState.draftChatHumanizeStrength || wizardState.draftChatHumanizeStrength === "standard" ? "selected" : ""}>标准</option><option value="deep" ${wizardState.draftChatHumanizeStrength === "deep" ? "selected" : ""}>深度</option></select></label>${selected?.missing_story_arc ? "<span>原情节缺失，保留内容可删除。</span>" : ""}${resetBtn}</div></div></section>`;
 }
 
 function renderDraftChat(volume, arcIdx, conversation, job = null) {
@@ -1151,9 +1179,7 @@ function renderDraftChat(volume, arcIdx, conversation, job = null) {
     const selectedArc = (volumeDetail?.arcs || []).find(
       (item) => Number(item.idx) === Number(arcIdx),
     );
-    const chapterRange = selectedArc
-      ? `第 ${selectedArc.start_ch}-${selectedArc.end_ch} 章`
-      : "当前情节单元";
+    const chapterRange = chapterBatchRange(selectedArc);
     if (!confirm(`将删除${chapterRange}的原始正文、精修正文、历史版本和最终版标记。确认重置？`)) return;
     try {
       await api(`/api/workspaces/${encodeURIComponent(wizardState.workspace)}/drafts/${volume}/${arcIdx}/reset`, {
@@ -1164,7 +1190,7 @@ function renderDraftChat(volume, arcIdx, conversation, job = null) {
       delete wizardState.draftJobIds[progressKey];
       await refreshWorkspaceArtifacts();
       await loadDraftChat(volume, arcIdx);
-      showToast("当前故事情节单元的正文已重置。");
+      showToast("本批正文及历史版本已删除。");
     } catch (error) {
       showToast(error.message || "无法重置正文。", true);
     }
@@ -1175,6 +1201,8 @@ function renderDraftChat(volume, arcIdx, conversation, job = null) {
 let draftJobPollTimer = null;
 let draftJobPollFailures = 0;
 async function loadDraftChat(volume, arcIdx) {
+  arcIdx = selectedChapterBatch(volume, arcIdx);
+  wizardState.draftChatArc = arcIdx;
   if (!arcIdx) {
     try {
       const guide = await api(`/api/workspaces/${encodeURIComponent(wizardState.workspace)}/drafts/writing-guide`);
@@ -1654,7 +1682,7 @@ function draftForm() {
     ? `<select id="draft-volume">${Array.from({ length: stageCount }, (_, index) => `<option value="${index + 1}">第 ${index + 1} 舞台 / 卷</option>`).join("")}</select>`
     : '<input id="draft-volume" type="number" min="1" value="1" />';
   const firstVolume = volumeDetails.find((item) => Number(item.volume) === 1) || volumeDetails[0];
-  const firstArcs = firstVolume?.arcs || [];
+  const firstArcs = (firstVolume?.arcs || []).filter((arc) => !arc.missing_story_arc);
   const arcOptions = firstArcs.length
     ? firstArcs.map((arc) => `<option value="${arc.idx}" data-start="${arc.start_ch}" data-end="${arc.end_ch}">情节单元${arc.idx}${arc.title ? ` · ${escapeHtml(arc.title)}` : ""}（第${arc.start_ch}-${arc.end_ch}章）</option>`).join("")
     : '<option value="">该舞台暂无故事情节</option>';
@@ -1701,7 +1729,7 @@ function bindDraftRange() {
   const updateArcs = () => {
     const volume = Number(volumeInput.value || 0);
     const detail = (wizardState.summary?.volumes || []).find((item) => Number(item.volume) === volume);
-    const arcs = detail?.arcs || [];
+    const arcs = (detail?.arcs || []).filter((arc) => !arc.missing_story_arc);
     arcSelect.innerHTML = arcs.length
       ? arcs.map((arc) => `<option value="${arc.idx}" data-start="${arc.start_ch}" data-end="${arc.end_ch}">情节单元${arc.idx}${arc.title ? ` · ${escapeHtml(arc.title)}` : ""}（第${arc.start_ch}-${arc.end_ch}章）</option>`).join("")
       : '<option value="">该舞台暂无故事情节</option>';
@@ -2368,24 +2396,27 @@ function chapterArcReviewGroups(step, scopedFiles) {
       const knownArcs = [...(volumeInfo?.arcs || [])].sort((a, b) => Number(a.idx) - Number(b.idx));
       const volumeFiles = files.filter((item) => Number(item.path.match(/\/vol_(\d+)\//i)?.[1]) === volumeNumber);
       const buckets = knownArcs.map((arc) => ({
+        ...arc,
         idx: Number(arc.idx), start_ch: Number(arc.start_ch), end_ch: Number(arc.end_ch),
         name: String(arc.title || "").trim(), files: [],
       }));
       const unmatched = [];
       volumeFiles.forEach((file) => {
         const chapter = chapterNumberFromPath(file.path);
-        const bucket = buckets.find((arc) => chapter !== null && chapter >= arc.start_ch && chapter <= arc.end_ch);
+        const bucket = buckets.find((arc) => chapter !== null && (arc.missing_story_arc
+          ? arc.chapters?.includes(chapter) : chapter >= arc.start_ch && chapter <= arc.end_ch));
         (bucket ? bucket.files : unmatched).push(file);
       });
       if (unmatched.length) buckets.push({ idx: null, start_ch: null, end_ch: null, name: "", files: unmatched });
       const arcs = buckets.filter((arc) => arc.files.length).map((arc) => {
         const orderedFiles = [...arc.files].sort((left, right) => left.path.localeCompare(right.path, "zh-CN", { numeric: true }));
-        const arcTitle = arc.idx === null ? "未归属故事片段" : `故事片段 ${arc.idx}${arc.name ? ` · ${arc.name}` : ""}`;
+        const arcTitle = arc.idx === null || arc.idx === -1 ? "未归属章节"
+          : arc.missing_story_arc ? chapterBatchLabel(arc) : `故事片段 ${arc.idx}${arc.name ? ` · ${arc.name}` : ""}`;
         const groupTitle = `第 ${volumeNumber} 卷 · ${arcTitle}`;
         return {
           ...arc,
           title: arcTitle,
-          description: arc.idx === null ? `${orderedFiles.length} 份章节内容` : `第 ${arc.start_ch}-${arc.end_ch} 章 · ${orderedFiles.length} 份内容`,
+          description: arc.idx === null ? `${orderedFiles.length} 份章节内容` : `${chapterBatchRange(arc)} · ${orderedFiles.length} 份内容`,
           artifacts: orderedFiles.map((file) => ({ path: file.path, ...artifactDescriptor(step, file.path), groupTitle })),
         };
       });

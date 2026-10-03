@@ -15,6 +15,67 @@ function wizard(elements = {}) {
   return sandbox;
 }
 function countButtons(html) { return (html.match(/data-preset-index=/g) || []).length; }
+
+test("retained chapters can be reset after the story arc was removed", () => {
+  const context = wizard();
+  vm.runInContext('wizardState.summary.volumes[0].arcs = [{idx:1,start_ch:1,end_ch:5,chapters:[1,2,3,4,5],missing_story_arc:true}];', context);
+  const outline = context.chaptersChatPanelMarkup(1, 1, { turns: [], has_outlines: true });
+  const draft = context.draftChatPanelMarkup(1, 1, { turns: [], has_drafts: true });
+  for (const [html, kind] of [[outline, "chapters"], [draft, "draft"]]) {
+    assert.match(html, /原情节已删除或为空/);
+    const reset = html.match(new RegExp(`<button id="reset-${kind}-chat"[^>]*>`))[0];
+    assert.ok(!reset.includes("disabled"));
+    assert.match(html, new RegExp(`<textarea id="${kind}-chat-input"[^>]*disabled`));
+    assert.match(html, new RegExp(`<button id="send-${kind}-chat"[^>]*disabled`));
+  }
+});
+
+test("unassigned batch has an explicit label and an exact sparse chapter range", () => {
+  const context = wizard();
+  const batch = { idx: -1, missing_story_arc: true, chapters: [1, 3, 4], start_ch: 1, end_ch: 4 };
+  assert.equal(context.chapterBatchLabel(batch), "未归属章节");
+  assert.equal(context.chapterBatchRange(batch), "第 1、3-4 章");
+  vm.runInContext(`wizardState.summary.volumes[0].arcs = [${JSON.stringify(batch)}];`, context);
+  assert.equal(context.selectedChapterBatch(1, 99), -1);
+  const html = context.draftChatPanelMarkup(1, -1, { has_drafts: true });
+  assert.match(html, /未归属章节/);
+  assert.doesNotMatch(html, /情节单元-1/);
+  assert.match(html, /id="reset-draft-chat"/);
+});
+
+test("loading after deletion selects a remaining batch instead of a stale id", async () => {
+  const context = wizard();
+  vm.runInContext('wizardState.summary.volumes[0].arcs = [{idx:2,start_ch:6,end_ch:8}];', context);
+  const requested = [];
+  context.api = async (url) => { requested.push(url); return { status: "idle", turns: [] }; };
+  context.renderChaptersChat = () => {};
+  context.renderDraftChat = () => {};
+  await context.loadChaptersChat(1, 1);
+  await context.loadDraftChat(1, 1);
+  assert.ok(requested.includes("/api/workspaces/fixture/chapters/1/2/conversation"));
+  assert.ok(requested.includes("/api/workspaces/fixture/drafts/1/2/conversation"));
+  assert.ok(requested.every(url => !url.includes("/1/1/")));
+  vm.runInContext('wizardState.summary.volumes[0].arcs = [];', context);
+  assert.equal(context.selectedChapterBatch(1, 2), null);
+});
+
+test("review groups use recorded chapters rather than the surrounding range", () => {
+  const context = wizard();
+  vm.runInContext('wizardState.summary.volumes[0].arcs = [{idx:1,start_ch:1,end_ch:3,chapters:[1,3],missing_story_arc:true},{idx:-1,start_ch:2,end_ch:2,chapters:[2],missing_story_arc:true}];', context);
+  const files = [1, 2, 3].map(ch => ({ path: `file_system/chapters/vol_01/${String(ch).padStart(3, "0")}_第${ch}章.md` }));
+  const groups = context.chapterArcReviewGroups({ id: "draft" }, files);
+  const batches = groups[0].volumes[0].arcs;
+  assert.equal(batches.find(b => b.idx === -1).artifacts.length, 1);
+  assert.equal(batches.find(b => b.idx === 1).artifacts.length, 2);
+  assert.match(batches.find(b => b.idx === 1).description, /第 1、3 章/);
+});
+
+test("retained content is not treated as an existing story arc to regenerate", () => {
+  const context = wizard();
+  vm.runInContext('wizardState.summary.volumes[0].arcs[0].missing_story_arc = true;', context);
+  assert.doesNotMatch(context.arcsChatPanelMarkup(1, { turns: [], has_arcs: false }), /id="reset-arcs-chat"/);
+  assert.match(context.draftForm(), /id="draft-arc" disabled/);
+});
 test("four stage-specific groups contain 32 distinct nonempty suggestions", () => {
   assert.deepEqual(Object.keys(presets.groups), ["concept", "stage", "arcs", "chapters"]);
   for (const items of Object.values(presets.groups)) {

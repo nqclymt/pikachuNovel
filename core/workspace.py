@@ -21,9 +21,9 @@ NOVELS_DIR = get_novels_dir()
 class NovelWorkspace:
     """一本小说的独立工作区，包含所有数据目录的路径解析。"""
 
-    def __init__(self, name):
+    def __init__(self, name, root_dir=None):
         self.name = name
-        self.root = os.path.join(get_novels_dir(), name)
+        self.root = os.path.join(root_dir if root_dir is not None else get_novels_dir(), name)
         self.file_system = os.path.join(self.root, "file_system")
         self.creative_direction = os.path.join(self.root, "creative_direction.md")
         self.reference = os.path.join(self.root, "reference")

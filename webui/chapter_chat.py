@@ -16,6 +16,7 @@ from typing import Any
 from core.workspace import init_workspace
 from core.prompt_trace import capture_prompts
 from core.llm_provider import capture_llm_status
+from webui.chapter_artifacts import artifact_workspace, batch_has_files, delete_batch_files
 
 
 def _read_text(path) -> str:
@@ -108,9 +109,9 @@ class ChapterOutlineChatManager:
         return self._cache[key]
 
     def history(self, workspace: str, volume: int, arc_idx: int) -> dict[str, Any]:
-        ws = init_workspace(workspace)
+        ws = artifact_workspace(self.root, workspace)
         history = self.get(workspace, volume, arc_idx).history()
-        history["has_outlines"] = _chapter_outlines_exist(ws, volume, arc_idx)
+        history["has_outlines"] = batch_has_files(Path(ws.file_system), volume, arc_idx, "outlines")
         return history
 
     def start_message(self, workspace: str, volume: int, arc_idx: int, message: str,
@@ -324,42 +325,18 @@ class ChapterOutlineChatManager:
         """清空对话，并删除该情节单元的章纲及对应系统面板快照。"""
         key = (workspace, volume, arc_idx)
         with self._jobs_lock:
-            job = self._jobs.get(key)
-            if job and job.get("status") in {"running", "pausing", "paused", "stopping"}:
+            if any(k[:2] == key[:2] and j.get("status") in {"running", "pausing", "paused", "stopping"}
+                   for k, j in self._jobs.items()):
                 raise ValueError("当前章纲仍在生成，请先结束任务再重置。")
-            if job:
-                job["prompt_history"] = []
-                job["prompt_count"] = 0
-                for field in ("current_prompt_id", "prompt_model", "prompt_created_at"):
-                    job.pop(field, None)
-        ws = init_workspace(workspace)
-        from training.adaptive_builder import _list_novel_story_arcs
-        arcs = _list_novel_story_arcs(ws, volume)
-        target = None
-        for arc in arcs:
-            if arc["idx"] == arc_idx:
-                target = arc
-                break
-        if target:
-            ch_dir = os.path.join(ws.file_system, "chapter_outlines", f"vol_{volume:02d}")
-            panel_dir = os.path.join(ws.file_system, "system_panels", f"vol_{volume:02d}")
-            for ch in range(target["start_ch"], target["end_ch"] + 1):
-                for path in (
-                    os.path.join(ch_dir, f"chapter_{ch:03d}.md"),
-                    os.path.join(panel_dir, f"chapter_{ch:03d}.json"),
-                ):
-                    try:
-                        os.remove(path)
-                    except FileNotFoundError:
-                        pass
+            ws = artifact_workspace(self.root, workspace)
+            batch = delete_batch_files(Path(ws.file_system), volume, arc_idx, "outlines")
             from training.adaptive_builder import clear_finalized_chapters
-            clear_finalized_chapters(
-                ws, "outlines", volume,
-                range(target["start_ch"], target["end_ch"] + 1),
-            )
-        conv = self.get(workspace, volume, arc_idx)
-        conv.clear()
-        return {"reset": True, "conversation": conv.history()}
+            clear_finalized_chapters(ws, "outlines", volume, batch["chapters"])
+            conv = self.get(workspace, volume, arc_idx)
+            conv.clear()
+            self._jobs.pop(key, None)
+            return {"reset": True, "deleted": batch["deleted"], "chapters": batch["chapters"],
+                    "conversation": conv.history()}
 
     def clear(self, workspace: str, volume: int, arc_idx: int) -> dict[str, Any]:
         conv = self.get(workspace, volume, arc_idx)

@@ -12,6 +12,7 @@ from typing import Any
 from core.llm_provider import LLMCallCancelled, capture_llm_status
 from core.prompt_trace import capture_prompts
 from core.workspace import init_workspace
+from webui.chapter_artifacts import artifact_workspace, batch_has_files, delete_batch_files
 
 
 def _conversation_path(root: Path, workspace: str, volume: int, arc_idx: int) -> Path:
@@ -90,9 +91,8 @@ class DraftChatManager:
     def history(self, workspace, volume, arc_idx):
         history = self.get(workspace, volume, arc_idx).history()
         history["writing_guide"] = self.writing_guide_status(workspace)
-        from training.adaptive_builder import chapter_draft_resume_status
-        status = chapter_draft_resume_status(init_workspace(workspace), volume, arc_idx)
-        history["has_drafts"] = bool(status.get("completed"))
+        ws = artifact_workspace(self.root, workspace)
+        history["has_drafts"] = batch_has_files(Path(ws.file_system), volume, arc_idx, "drafts")
         return history
 
     def writing_guide_status(self, workspace):
@@ -344,56 +344,20 @@ class DraftChatManager:
         """删除当前情节单元的正式正文、精修前快照、历史版本和最终版标记。"""
         key = (workspace, volume, arc_idx)
         with self._lock:
-            job = self._jobs.get(key)
-            if job and job["status"] in {"running", "pausing", "paused", "stopping"}:
+            if any(k[:2] == key[:2] and j.get("status") in {"running", "pausing", "paused", "stopping"}
+                   for k, j in self._jobs.items()):
                 raise ValueError("当前故事情节正在生成正文，请先结束任务再重置。")
-            if job:
-                job["prompt_history"] = []
-                job["prompt_count"] = 0
-                for field in ("current_prompt_id", "prompt_model", "prompt_created_at"):
-                    job.pop(field, None)
-
-        from training.adaptive_builder import (
-            _list_novel_story_arcs,
-            clear_finalized_chapters,
-        )
-        ws = init_workspace(workspace)
-        arc = next(
-            (item for item in _list_novel_story_arcs(ws, volume) if item["idx"] == arc_idx),
-            None,
-        )
-        if not arc:
-            raise ValueError("未找到当前故事情节单元。")
-
-        chapters = list(range(arc["start_ch"], arc["end_ch"] + 1))
-        refined_dir = Path(ws.file_system) / "chapters" / f"vol_{volume:02d}"
-        refined_versions = refined_dir / "versions"
-        raw_dir = Path(ws.file_system) / "drafts" / f"vol_{volume:02d}" / "raw_chapters"
-        raw_versions = raw_dir / "versions"
-        deleted = 0
-        for chapter in chapters:
-            targets = [
-                refined_dir / f"{chapter:03d}_第{chapter}章.md",
-                raw_dir / f"{chapter:03d}_第{chapter}章.raw.md",
-            ]
-            targets.extend(refined_versions.glob(f"{chapter:03d}_第{chapter}章.md_*"))
-            targets.extend(raw_versions.glob(f"{chapter:03d}_第{chapter}章_*.raw.md"))
-            for path in targets:
-                if path.is_file():
-                    path.unlink()
-                    deleted += 1
-
-        clear_finalized_chapters(ws, "drafts", volume, chapters)
-        conv = self.get(workspace, volume, arc_idx)
-        conv.turns = []
-        conv.save()
-        with self._lock:
+            from training.adaptive_builder import clear_finalized_chapters
+            ws = artifact_workspace(self.root, workspace)
+            batch = delete_batch_files(Path(ws.file_system), volume, arc_idx, "drafts")
+            clear_finalized_chapters(ws, "drafts", volume, batch["chapters"])
+            conv = self.get(workspace, volume, arc_idx)
+            conv.turns = []
+            conv.save()
             self._jobs.pop(key, None)
-        _job_state_path(self.root, workspace, volume, arc_idx).unlink(missing_ok=True)
-        return {
-            "reset": True,
-            "deleted": deleted,
-            "start_chapter": arc["start_ch"],
-            "end_chapter": arc["end_ch"],
-            "conversation": conv.history(),
-        }
+            _job_state_path(self.root, workspace, volume, arc_idx).unlink(missing_ok=True)
+            return {
+                "reset": True, "deleted": batch["deleted"], "chapters": batch["chapters"],
+                "start_chapter": batch["start_ch"], "end_chapter": batch["end_ch"],
+                "conversation": conv.history(),
+            }

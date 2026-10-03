@@ -257,13 +257,10 @@ class WorkspaceStore:
     def _volume_details(self, base: Path, fs: Path) -> list[dict[str, Any]]:
         """列出每个舞台/卷的故事情节单元和章节数据。"""
         details = []
-        stage_roadmap = _read_file(fs / "story_design" / "stage_roadmap.md") if False else ""
-        # 扫描 story_arcs 和 chapter_outlines 目录
-        for kind, dirname in [("story_arcs", "story_arcs"), ("chapter_outlines", "chapter_outlines")]:
-            pass
+        from webui.chapter_artifacts import chapter_batches
         # 收集所有卷号
         vol_nums = set()
-        for dirname in ["story_arcs", "chapter_outlines", "chapters"]:
+        for dirname in ["story_arcs", "chapter_outlines", "chapters", "drafts", "system_panels"]:
             dir_path = fs / dirname
             if dir_path.is_dir():
                 for child in dir_path.iterdir():
@@ -273,23 +270,7 @@ class WorkspaceStore:
                         vol_nums.add(int(m.group(1)))
         for vol in sorted(vol_nums):
             vol_idx = vol
-            arc_dir = fs / "story_arcs" / f"vol_{vol_idx:02d}"
-            arcs = []
-            if arc_dir.is_dir():
-                for fname in sorted(arc_dir.iterdir()):
-                    import re as _re
-                    m = _re.match(r"arc_(\d+)_ch(\d+)_(\d+)\.md", fname.name)
-                    if m:
-                        try:
-                            heading = fname.read_text(encoding="utf-8")[:1000]
-                        except (OSError, UnicodeDecodeError):
-                            heading = ""
-                        arcs.append({
-                            "idx": int(m.group(1)),
-                            "start_ch": int(m.group(2)),
-                            "end_ch": int(m.group(3)),
-                            "title": story_arc_title(heading),
-                        })
+            arcs = chapter_batches(fs, vol_idx)
             ch_dir = fs / "chapter_outlines" / f"vol_{vol_idx:02d}"
             ch_count = 0
             if ch_dir.is_dir():
