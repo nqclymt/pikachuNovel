@@ -492,6 +492,17 @@ button:disabled { cursor: not-allowed; }
 .model-config-group label { display: grid; gap: 5px; color: #52635b; font-size: 11px; font-weight: 700; }
 .model-config-group input { width: 100%; height: 35px; padding: 0 9px; border: 1px solid var(--line-strong); border-radius: 4px; color: var(--ink); background: #fff; outline: none; font-size: 12px; }
 .model-config-group input:focus { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(11,119,105,.1); }
+.model-config-group select { width: 100%; height: 35px; padding: 0 9px; border: 1px solid var(--line-strong); border-radius: 4px; color: var(--ink); background: #fff; outline: none; font-size: 12px; }
+.model-backend-fields { display: grid; gap: 9px; }
+.model-backend-fields[hidden] { display: none; }
+.model-config-hint { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.antigravity-panel { display: grid; gap: 9px; padding: 13px; border: 1px solid #d9e5de; border-radius: 5px; background: #f5faf8; }
+.antigravity-panel h3 { margin: 0; color: #29483c; font-size: 13px; }
+.antigravity-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.antigravity-actions button { min-height: 29px; padding: 5px 9px; font-size: 11px; }
+.antigravity-result { margin: 0; color: #28654d; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.antigravity-result:empty { display: none; }
+.antigravity-result.error { color: #a34839; }
 .cc-switch-import { display: grid; gap: 10px; padding: 2px 0 15px; border-bottom: 1px solid var(--line); }
 .cc-switch-import > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .cc-switch-header-actions { display: flex; align-items: center; gap: 7px; }

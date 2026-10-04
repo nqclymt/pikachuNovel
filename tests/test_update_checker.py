@@ -32,12 +32,20 @@ class UpdateCheckerTests(unittest.TestCase):
         self.assertEqual(_version_key("invalid"), ())
 
     def test_detects_new_stable_release(self):
-        with patch("webui.update_checker.urllib.request.urlopen", return_value=_Response()):
+        with patch("webui.update_checker.APP_VERSION", "2.1.2"), \
+                patch("webui.update_checker.urllib.request.urlopen", return_value=_Response()):
             result = check_latest_release()
 
         self.assertTrue(result["update_available"])
         self.assertEqual(result["latest_version"], "2.2.0")
         self.assertIn("releases/tag/v2.2.0", result["release_url"])
+
+    def test_current_release_does_not_offer_itself_as_an_update(self):
+        with patch("webui.update_checker.APP_VERSION", "2.2.0"), \
+                patch("webui.update_checker.urllib.request.urlopen", return_value=_Response()):
+            result = check_latest_release()
+        self.assertFalse(result["update_available"])
+        self.assertEqual(result["latest_version"], "2.2.0")
 
     def test_network_failure_is_non_fatal(self):
         with patch("webui.update_checker.urllib.request.urlopen", side_effect=OSError("offline")):

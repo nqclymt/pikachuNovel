@@ -9,6 +9,9 @@
 【待检查正文】
 {chapter_text}
 
+【本轮写作要求】
+{writing_requirements}
+
 规则：
 1. 知识没有在正文中出现不算错误，禁止要求补充百科说明。
 2. 只有正文明确写出与事实相反的身份、关系、规则、能力条件、物品归属或状态时才判冲突。
@@ -19,4 +22,5 @@
 {{"status":"passed|conflict","rewrite":false,"corrections":[],"reason":"简短理由"}}
 
 存在明确冲突时将 rewrite 设为 true，corrections 每项使用：
-{{"original":"正文中的冲突片段","replacement":"符合事实且尽量等长的替换片段","fact":"依据"}}
+{{"original":"正文中唯一出现、只在单个段落内的冲突片段","replacement":"符合事实且尽量等长的替换片段","fact_id":"fact_1","fact":"引用该事实条目的依据"}}
+禁止修改标题、跨段替换或替换整章。original 必须足以唯一定位人物和位置；重复短语请带上必要的相邻文字。fact_id 必须来自上面的事实列表。不能安全局部修复时保留 conflict，corrections 为空，并说明需要人工处理。

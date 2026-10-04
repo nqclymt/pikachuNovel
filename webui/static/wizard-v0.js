@@ -87,6 +87,7 @@ const wizardState = {
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 let settingsConfigGroups = [];
+let antigravityStatusTimer = null;
 
 async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers: { ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }), ...(options.headers || {}) } });
@@ -100,6 +101,8 @@ async function api(path, options = {}) {
 }
 
 function closeSettings() {
+  clearInterval(antigravityStatusTimer);
+  antigravityStatusTimer = null;
   $("#settings-panel").classList.remove("open");
   $("#settings-panel").setAttribute("aria-hidden", "true");
   $("#settings-scrim").classList.remove("open");
@@ -107,18 +110,140 @@ function closeSettings() {
 
 function modelConfigFields(groupId, group) {
   const prefix = CONFIG_PREFIXES[groupId];
-  const inherited = groupId === "humanize_builder" && !group.api_key_configured && !group.model && !group.base_url;
-  const configured = inherited ? "沿用正文模型" : group.api_key_configured ? "API Key 已配置" : "未配置 API Key";
-  return `<section class="model-config-group">
-    <header><h3>${escapeHtml(group.label)}</h3><span class="config-status ${group.api_key_configured || inherited ? "ready" : "missing"}">${configured}</span></header>
-    <label>模型名称<input name="${prefix}_MODEL" value="${escapeHtml(group.model || "")}" placeholder="例如：deepseek-v4-pro" autocomplete="off" /></label>
+  const cli = group.backend === "antigravity_cli";
+  const inherited = !cli && groupId === "humanize_builder" && !group.api_key_configured && !group.model && !group.base_url;
+  const configured = cli ? "Google 登录 · 待测试" : inherited ? "沿用正文模型" : group.api_key_configured ? "API Key 已配置" : "未配置 API Key";
+  return `<section class="model-config-group" data-model-group="${groupId}">
+    <header><h3>${escapeHtml(group.label)}</h3><span data-model-config-status class="config-status ${!cli && (group.api_key_configured || inherited) ? "ready" : "missing"}">${configured}</span></header>
+    <label>调用方式<select name="${prefix}_BACKEND" data-model-backend>
+      <option value="openai" ${!cli ? "selected" : ""}>OpenAI 兼容 API</option>
+      <option value="antigravity_cli" ${cli ? "selected" : ""}>Antigravity（Google 登录）</option>
+    </select></label>
+    <label>模型名称<input name="${prefix}_MODEL" value="${escapeHtml(group.model || "")}" placeholder="${cli ? "留空使用 agy 默认模型；终端 agy models 查看名称" : "例如：deepseek-v4-pro"}" autocomplete="off" /></label>
+    <div class="model-backend-fields" data-openai-fields ${cli ? "hidden" : ""}>
     <label>Base URL<input name="${prefix}_BASE_URL" value="${escapeHtml(group.base_url || "")}" placeholder="https://api.example.com" autocomplete="off" /></label>
     <label>调用协议<select name="${prefix}_WIRE_API">
       <option value="chat_completions" ${group.wire_api !== "responses" ? "selected" : ""}>Chat Completions（通用兼容接口）</option>
       <option value="responses" ${group.wire_api === "responses" ? "selected" : ""}>Responses（Codex / OpenAI）</option>
     </select></label>
     <label>API Key<input name="${prefix}_API_KEY" type="password" placeholder="${group.api_key_configured ? "已配置，留空保持不变" : "请输入 API Key"}" autocomplete="new-password" /></label>
+    </div>
+    <div class="model-backend-fields" data-antigravity-fields ${cli ? "" : "hidden"}>
+      <label>agy 可执行文件路径<input name="${prefix}_CLI_PATH" value="${escapeHtml(group.cli_path || "")}" placeholder="留空自动检测；也可填写 agy 的完整路径" autocomplete="off" /></label>
+      <label>自定义 Agent<input name="${prefix}_CLI_AGENT" value="${escapeHtml(group.cli_agent || "")}" placeholder="留空使用内置小说写作指令" autocomplete="off" /></label>
+      <label>思考强度<select name="${prefix}_CLI_EFFORT">
+        ${[["low", "低"], ["medium", "中"], ["high", "高"]].map(([value, label]) => `<option value="${value}" ${(group.cli_effort || "medium") === value ? "selected" : ""}>${label}</option>`).join("")}
+      </select></label>
+      <p class="model-config-hint">切换后请确认模型名称，清空可使用 agy 默认模型。自定义 Agent 须禁用工具（tools: []）。检测与测试使用当前填写值；测试成功后请保存配置。</p>
+      <div class="antigravity-actions"><button type="button" class="secondary-button" data-antigravity-probe>检测安装</button><button type="button" class="secondary-button" data-antigravity-test>测试连接（使用额度）</button></div>
+      <p class="antigravity-result" data-antigravity-result role="status" aria-live="polite"></p>
+    </div>
   </section>`;
+}
+
+function antigravityPanelMarkup() {
+  return `<section class="antigravity-panel">
+    <h3>Antigravity 调度</h3>
+    <p class="model-config-hint">请先安装官方 agy，在本机终端运行 agy 并用 Google 账号登录。各阶段共用串行队列；登录失效或达到额度限制时暂停后续调用，修复后可恢复调度。</p>
+    <p class="model-config-hint">恢复调度后，请回到任务或章节界面继续已中断的写作。登录和订阅额度由 agy 管理。</p>
+    <p id="antigravity-scheduler-status" class="antigravity-result" role="status" aria-live="polite">正在读取调度状态…</p>
+    <div class="antigravity-actions"><button type="button" class="secondary-button" id="refresh-antigravity-scheduler">刷新状态</button><button type="button" class="secondary-button" id="resume-antigravity-scheduler" disabled>恢复调度</button></div>
+  </section>`;
+}
+
+function antigravitySchedulerText(state) {
+  if (state.paused) return `调度已暂停：${state.message || state.reason || "请检查账号登录或可用额度"}`;
+  const running = state.running || Number(state.active || 0) > 0;
+  const waiting = Number(state.waiting ?? state.queued ?? 0);
+  return `${running ? "正在执行 1 个请求" : "调度就绪"}${waiting ? `，排队 ${waiting} 个请求` : ""}`;
+}
+
+function renderAntigravityScheduler(state) {
+  const status = $("#antigravity-scheduler-status");
+  if (!status) return;
+  status.textContent = antigravitySchedulerText(state);
+  status.classList.toggle("error", Boolean(state.paused));
+  const resume = $("#resume-antigravity-scheduler");
+  if (resume) resume.disabled = !state.paused;
+}
+
+async function refreshAntigravityScheduler() {
+  try {
+    renderAntigravityScheduler(await api("/api/config/antigravity/scheduler"));
+  } catch (error) {
+    const status = $("#antigravity-scheduler-status");
+    if (status) status.textContent = error.message || "无法读取调度状态。";
+  }
+}
+
+function antigravityFormValues(section) {
+  const prefix = CONFIG_PREFIXES[section.dataset.modelGroup];
+  return Object.fromEntries(["model", "cli_path", "cli_agent", "cli_effort"].map((key) => [
+    key, section.querySelector(`[name="${prefix}_${key.toUpperCase()}"]`)?.value.trim() || "",
+  ]));
+}
+
+async function checkAntigravity(event, testConnection = false) {
+  const button = event.currentTarget;
+  const section = button.closest("[data-model-group]");
+  const result = section.querySelector("[data-antigravity-result]");
+  const buttons = [...section.querySelectorAll("[data-antigravity-probe], [data-antigravity-test]")];
+  buttons.forEach((item) => { item.disabled = true; });
+  result.classList.remove("error");
+  result.textContent = testConnection ? "正在使用当前表单配置发起一次短请求，最多等待约 65 秒…" : "正在检测本机 agy，不调用模型…";
+  try {
+    const values = antigravityFormValues(section);
+    const data = testConnection
+      ? await api("/api/config/antigravity/test", { method: "POST", body: JSON.stringify(values) })
+      : await api(`/api/config/antigravity/status?cli_path=${encodeURIComponent(values.cli_path)}`);
+    if (testConnection) {
+      result.textContent = `连接成功：${data.response}。请保存配置后用于写作。`;
+    } else if (data.error) {
+      result.textContent = `${data.error}${data.path ? `（${data.path}）` : ""}`;
+      result.classList.add("error");
+    } else if (data.installed) {
+      result.textContent = `已检测到 agy${data.version ? `（${data.version}）` : ""}：${data.path}。安装检测不验证账号，请点击测试连接。`;
+    } else {
+      result.textContent = data.error || "未检测到 agy，请安装官方 CLI，或填写可执行文件路径后重新检测。";
+      result.classList.add("error");
+    }
+    if (data.scheduler) renderAntigravityScheduler(data.scheduler);
+  } catch (error) {
+    result.textContent = error.message || "Antigravity 检测失败。";
+    result.classList.add("error");
+    await refreshAntigravityScheduler();
+  } finally {
+    buttons.forEach((item) => { item.disabled = false; });
+  }
+}
+
+function bindModelBackendActions() {
+  $$('[data-model-backend]').forEach((select) => select.addEventListener("change", () => {
+    const section = select.closest("[data-model-group]");
+    const cli = select.value === "antigravity_cli";
+    section.querySelector("[data-openai-fields]").hidden = cli;
+    section.querySelector("[data-antigravity-fields]").hidden = !cli;
+    const status = section.querySelector("[data-model-config-status]");
+    status.textContent = cli ? "Google 登录 · 待测试" : "API 配置 · 待保存";
+    status.classList.remove("ready");
+    status.classList.add("missing");
+    const prefix = CONFIG_PREFIXES[section.dataset.modelGroup];
+    section.querySelector(`[name="${prefix}_MODEL"]`).placeholder = cli ? "留空使用 agy 默认模型；终端 agy models 查看名称" : "例如：deepseek-v4-pro";
+  }));
+  $$('[data-antigravity-probe]').forEach((button) => button.addEventListener("click", (event) => checkAntigravity(event)));
+  $$('[data-antigravity-test]').forEach((button) => button.addEventListener("click", (event) => checkAntigravity(event, true)));
+  $("#refresh-antigravity-scheduler")?.addEventListener("click", refreshAntigravityScheduler);
+  $("#resume-antigravity-scheduler")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      renderAntigravityScheduler(await api("/api/config/antigravity/resume", { method: "POST", body: "{}" }));
+      showToast("调度已恢复，请回到任务或章节界面继续写作。");
+    } catch (error) {
+      showToast(error.message || "恢复调度失败。", true);
+      button.disabled = false;
+    }
+  });
 }
 
 function ccSwitchImportMarkup(source, groups) {
@@ -175,6 +300,8 @@ async function refreshCCSwitchConfig(event) {
 }
 
 async function openSettings() {
+  clearInterval(antigravityStatusTimer);
+  antigravityStatusTimer = null;
   const content = $("#settings-content");
   content.innerHTML = '<p class="settings-loading">正在读取本地配置…</p>';
   $("#settings-panel").classList.add("open");
@@ -190,12 +317,18 @@ async function openSettings() {
     content.innerHTML = `<form id="model-config-form" class="model-config-form">
       <p class="config-path">${escapeHtml(config.config_path || "")}</p>
       ${ccSwitchImportMarkup(ccSwitch, groups)}
+      ${antigravityPanelMarkup()}
       ${groups.map(([id, group]) => modelConfigFields(id, group)).join("")}
       <div class="settings-actions"><button id="cancel-settings" class="secondary-button" type="button">取消</button><button class="primary-button" type="submit">保存配置</button></div>
     </form>`;
     $("#cancel-settings").addEventListener("click", closeSettings);
     bindCCSwitchImportActions();
+    bindModelBackendActions();
     $("#model-config-form").addEventListener("submit", saveModelConfig);
+    await refreshAntigravityScheduler();
+    if ($("#settings-panel").classList.contains("open")) {
+      antigravityStatusTimer = setInterval(refreshAntigravityScheduler, 5000);
+    }
   } catch (error) {
     content.innerHTML = `<p class="settings-error">${escapeHtml(error.message || "无法读取配置。")}</p>`;
   }
@@ -233,7 +366,7 @@ async function saveModelConfig(event) {
   const values = {};
   [...form.querySelectorAll('[name]')].forEach((field) => {
     const value = field.value.trim();
-    if (value) values[field.name] = value;
+    if (value || !field.name.endsWith("_API_KEY")) values[field.name] = value;
   });
   submit.disabled = true;
   try {
@@ -820,17 +953,22 @@ function selectedChapterBatch(volume, arcIdx) {
 
 function chaptersJobMarkup(job) {
   if (!job) return "";
-  if (job.status === "idle" && job.can_resume) {
+  if (["idle", "interrupted", "failed", "stopped"].includes(job.status) && job.can_resume) {
     const completed = Number(job.completed || 0), total = Number(job.total || 0);
-    const percent = total ? Math.round(completed * 100 / total) : 0;
+    const percent = total ? Math.max(0, Math.min(100, Math.round(completed * 100 / total))) : 0;
+    const title = job.status === "failed" ? "章纲任务失败，可按原要求继续"
+      : job.status === "stopped" ? "章纲任务已停止，可按原要求继续"
+      : job.request?.mode === "refine" ? "上次章纲调整尚未完成"
+      : `上次生成在第 ${Number(job.next_chapter || completed + 1)} 章前中断`;
+    const detail = job.error || job.message || `已保留 ${completed} / ${total} 章`;
     return `<div class="chat-job-progress is-interrupted" id="chapters-job-progress">
       <div class="chat-job-progress-main"><span class="chat-job-status-dot"></span>
-        <div class="chat-job-progress-copy"><strong>上次生成在第 ${Number(job.next_chapter || completed + 1)} 章前中断</strong><span>已保留 ${completed} / ${total} 章</span></div>
-        <button id="continue-chapters-job" class="chat-job-action resume continue" type="button"><span>▶</span>继续生成</button>
+        <div class="chat-job-progress-copy"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(detail)}</span></div>
+        <button id="continue-chapters-job" class="chat-job-action resume continue" type="button"><span>▶</span>按原要求继续</button>
       </div><div class="chat-job-progress-track"><i style="width:${percent}%"></i></div>
     </div>`;
   }
-  if (["idle", "completed", "failed", "stopped"].includes(job.status)) return "";
+  if (["idle", "completed", "failed", "stopped", "interrupted"].includes(job.status)) return "";
   const total = Number(job.total || 0), completed = Number(job.completed || 0);
   const refining = job.progress_kind === "serial_chapter_refine";
   const routing = refining && job.phase === "routing";

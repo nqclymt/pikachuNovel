@@ -238,6 +238,15 @@ class StyleEngineReviewTests(unittest.TestCase):
                     return '{"issues":[]}'
                 if "Chinese commercial-fiction line editor" in prompt:
                     return '{"replacements":[]}'
+                if "你是章节内容验收编辑" in prompt:
+                    # This fixture tests the style chain. Evidence/schema rejection is
+                    # covered independently in test_chapter_acceptance.py.
+                    return json.dumps({"event_checks": [], "planning_issue_checks": [],
+                        "context_checks": [{"category": category, "status": "not_applicable",
+                            "evidence": "客人离开了。", "constraint_quote": "",
+                            "reason": "风格链测试使用固定验收结果。"}
+                            for category in ("hidden_information", "character_knowledge", "ending_state")]},
+                        ensure_ascii=False)
                 return prose
             llm.generate = route
             replacements = {"_load_volume_outline_context": "现有全书设计", "_get_lite_llm": llm, "_get_humanize_llm": llm,

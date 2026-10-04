@@ -55,6 +55,10 @@ class ConfigLoader:
             "base_url": os.getenv(f"{prefix}_BASE_URL") or env.get(f"{prefix}_BASE_URL", ""),
             "api_key": os.getenv(f"{prefix}_API_KEY") or env.get(f"{prefix}_API_KEY", ""),
             "wire_api": os.getenv(f"{prefix}_WIRE_API") or env.get(f"{prefix}_WIRE_API", "chat_completions"),
+            "backend": os.getenv(f"{prefix}_BACKEND") or env.get(f"{prefix}_BACKEND", "openai"),
+            "cli_path": os.getenv(f"{prefix}_CLI_PATH") or env.get(f"{prefix}_CLI_PATH", ""),
+            "cli_agent": os.getenv(f"{prefix}_CLI_AGENT") or env.get(f"{prefix}_CLI_AGENT", ""),
+            "cli_effort": os.getenv(f"{prefix}_CLI_EFFORT") or env.get(f"{prefix}_CLI_EFFORT", "medium"),
         }
 
     @classmethod

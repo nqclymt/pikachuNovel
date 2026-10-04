@@ -28,13 +28,15 @@ from webui.design_chat import DesignChatManager
 from webui.arc_chat import ArcsChatManager
 from webui.chapter_chat import ChapterOutlineChatManager
 from webui.draft_chat import DraftChatManager
+from webui.chapter_artifacts import artifact_workspace
 from webui.cc_switch import load_cc_switch_providers, validate_cc_switch_provider
 from webui.auto_updater import AutoUpdateError, auto_update_capability, prepare_auto_update
 from webui.update_checker import check_latest_release
 from webui.version import APP_VERSION, UPDATE_RELEASES_PREFIX, UPDATE_RELEASES_URL
-from core.llm_provider import normalize_wire_api
+from core.llm_provider import LLMProvider, normalize_backend, normalize_wire_api
 from core.text_encoding import read_text_file
 from core.workspace import init_workspace
+from core.story_tasks import StoryTaskBusy, idle_story_mutation
 
 
 APP_HOME = Path.home() / ".harnessNovel"
@@ -67,6 +69,11 @@ CONFIG_GROUPS = {
     "adaptive_builder_lite": ("故事情节、章纲与正文模型（推荐 Flash）", "ADAPTIVE_BUILDER_LITE"),
     "humanize_builder": ("正文自然化精修模型（可选；留空沿用正文模型）", "HUMANIZE_BUILDER"),
 }
+CONFIG_KEYS += [
+    f"{prefix}_{suffix}"
+    for _, prefix in CONFIG_GROUPS.values()
+    for suffix in ("BACKEND", "CLI_PATH", "CLI_AGENT", "CLI_EFFORT")
+]
 
 
 def _effective_config_path() -> Path:
@@ -126,12 +133,32 @@ def _config_for_client() -> dict[str, Any]:
     for group_id, (label, prefix) in CONFIG_GROUPS.items():
         groups[group_id] = {
             "label": label,
+            "backend": values.get(f"{prefix}_BACKEND", "openai"),
             "model": values.get(f"{prefix}_MODEL", ""),
             "base_url": values.get(f"{prefix}_BASE_URL", ""),
             "wire_api": values.get(f"{prefix}_WIRE_API", "chat_completions"),
             "api_key_configured": bool(values.get(f"{prefix}_API_KEY", "")),
+            "cli_path": values.get(f"{prefix}_CLI_PATH", ""),
+            "cli_agent": values.get(f"{prefix}_CLI_AGENT", ""),
+            "cli_effort": values.get(f"{prefix}_CLI_EFFORT", "medium"),
         }
     return {"config_path": str(_effective_config_path()), "groups": groups}
+
+
+def _config_value(key: str, raw: Any) -> str:
+    """Validate individual settings before writing line-oriented configuration."""
+    value = str(raw).strip()
+    if "\n" in value or "\r" in value or "\x00" in value:
+        raise ValueError("配置值不能包含换行或空字符。")
+    if key.endswith("_BACKEND"):
+        return normalize_backend(value)
+    if key.endswith("_WIRE_API"):
+        return normalize_wire_api(value)
+    if key.endswith("_CLI_EFFORT"):
+        value = value or "medium"
+        if value not in {"low", "medium", "high"}:
+            raise ValueError("Antigravity 思考强度只能是 low、medium 或 high。")
+    return value
 
 
 def _cc_switch_config_for_client() -> dict[str, Any]:
@@ -265,11 +292,12 @@ class WebRuntime:
             raise ValueError("该工作区仍有内容生成任务正在执行，请先结束任务再删除。")
         self.tasks.begin_workspace_delete(name)
         try:
-            result = self.store.delete_workspace(name)
-            task_result = self.tasks.delete_workspace_records(name)
-            for manager in managers:
-                self._forget_chat_workspace(manager, name)
-            return {**result, **task_result}
+            with idle_story_mutation(artifact_workspace(self.store.root, name)):
+                result = self.store.delete_workspace(name)
+                task_result = self.tasks.delete_workspace_records(name)
+                for manager in managers:
+                    self._forget_chat_workspace(manager, name)
+                return {**result, **task_result}
         finally:
             self.tasks.end_workspace_delete(name)
 
@@ -279,6 +307,8 @@ def _http_error(exc: Exception, status_code: int = 400) -> HTTPException:
 
 
 def create_app(workspace_root: str | None = None) -> FastAPI:
+    from core.writing_requirements import read_default_writing_guide
+    read_default_writing_guide()  # Fail clearly before accepting work from an incomplete package.
     runtime = WebRuntime(workspace_root)
     app = FastAPI(title="PikachuNovel Web", version=APP_VERSION, docs_url=None, redoc_url=None)
     app.state.runtime = runtime
@@ -353,17 +383,15 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
             value = raw_values.get(key)
             if value is None:
                 continue
-            value = str(value).strip()
+            try:
+                value = _config_value(key, value)
+            except ValueError as exc:
+                raise _http_error(exc) from exc
             # API Key 留空即保持已有值，避免浏览器无法回显密钥时误清空。
             if key.endswith("_API_KEY") and not value:
                 continue
-            if key.endswith("_WIRE_API"):
-                try:
-                    value = normalize_wire_api(value)
-                except ValueError as exc:
-                    raise _http_error(exc) from exc
-            if value:
-                updates[key] = value
+            # Empty model / CLI path is meaningful: use the CLI's defaults.
+            updates[key] = value
         if updates:
             _update_env(updates)
             # 同步更新当前 Web 进程。ConfigLoader 默认优先读取 os.environ，
@@ -371,6 +399,59 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
             from core.config import ConfigLoader
             ConfigLoader.activate(updates)
         return _config_for_client()
+
+    @app.get("/api/config/antigravity/status")
+    def antigravity_status(cli_path: str = Query(default="")) -> dict[str, Any]:
+        from core.antigravity import probe_antigravity, scheduler_status
+
+        return {**probe_antigravity(cli_path=cli_path), "scheduler": scheduler_status()}
+
+    @app.get("/api/config/antigravity/scheduler")
+    def antigravity_scheduler() -> dict[str, Any]:
+        from core.antigravity import scheduler_status
+
+        return scheduler_status()
+
+    @app.post("/api/config/antigravity/resume")
+    def antigravity_resume() -> dict[str, Any]:
+        from core.antigravity import resume_scheduler
+
+        return resume_scheduler()
+
+    @app.post("/api/config/antigravity/test")
+    def antigravity_test(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        # Sync routes run in FastAPI's worker pool. A total deadline also covers
+        # time waiting for the shared CLI slot, so the browser cannot hang.
+        from core.antigravity import scheduler_status
+
+        try:
+            arguments = {
+                name: _config_value(f"TEST_{name.upper()}", payload.get(name) or "")
+                for name in ("model", "cli_path", "cli_agent", "cli_effort")
+            }
+            state = scheduler_status()
+            if state.get("paused"):
+                raise _http_error(ValueError(state.get("message") or "Antigravity 调度已暂停，请恢复后再测试。"), 409)
+            provider = LLMProvider(backend="antigravity_cli", **arguments)
+            provider.timeout = 60.0
+            cancelled = threading.Event()
+            deadline = threading.Timer(65.0, cancelled.set)
+            deadline.daemon = True
+            deadline.start()
+            try:
+                response = provider.generate_cancelable(
+                    "这是小说工作台的连接测试。不要调用工具，不要访问或修改文件，只回复：连接成功。",
+                    cancel_event=cancelled, max_retries=0, max_tokens=32,
+                )
+                if not response.strip():
+                    raise RuntimeError("Antigravity 未返回内容，请在终端运行 agy 检查登录和模型配置。")
+            finally:
+                deadline.cancel()
+            return {"ok": True, "response": response.strip()[:500], "scheduler": scheduler_status()}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise _http_error(exc) from exc
 
     @app.get("/api/config/cc-switch")
     def get_cc_switch_config() -> dict[str, Any]:
@@ -404,6 +485,7 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
                     validated[provider_id] = validate_cc_switch_provider(provider)
                 resolved = validated[provider_id]
                 prefix = CONFIG_GROUPS[group_id][1]
+                updates[f"{prefix}_BACKEND"] = "openai"
                 updates[f"{prefix}_MODEL"] = resolved.model
                 updates[f"{prefix}_BASE_URL"] = resolved.base_url
                 updates[f"{prefix}_API_KEY"] = resolved.api_key
@@ -473,6 +555,8 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
     def delete_workspace(name: str) -> dict[str, Any]:
         try:
             return runtime.delete_workspace(name)
+        except StoryTaskBusy as exc:
+            raise _http_error(exc, 409) from exc
         except FileNotFoundError as exc:
             raise _http_error(ValueError("工作区不存在。"), 404) from exc
         except ValueError as exc:
@@ -503,8 +587,11 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
             content = payload.get("content")
             if not isinstance(content, str):
                 raise ValueError("保存内容必须是文本。")
-            runtime.store.write_file(name, path, content)
+            with idle_story_mutation(artifact_workspace(runtime.store.root, name)):
+                runtime.store.write_file(name, path, content)
             return {"saved": True}
+        except StoryTaskBusy as exc:
+            raise _http_error(exc, 409) from exc
         except ValueError as exc:
             raise _http_error(exc) from exc
 
@@ -622,7 +709,10 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
     @app.post("/api/workspaces/{name}/arcs/{volume}/reset")
     def arcs_reset(name: str, volume: int) -> dict[str, Any]:
         try:
-            return runtime.arcs_chat.reset(name, volume)
+            with idle_story_mutation(artifact_workspace(runtime.store.root, name)):
+                return runtime.arcs_chat.reset(name, volume)
+        except StoryTaskBusy as exc:
+            raise _http_error(exc, 409) from exc
         except Exception as exc:
             raise _http_error(exc) from exc
 
@@ -662,7 +752,11 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
     def chapters_system_panel_config(name: str, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
         try:
             from training.adaptive_builder import configure_system_panel
-            return configure_system_panel(init_workspace(name), str(payload.get("mode") or "auto"))
+            ws = artifact_workspace(runtime.store.root, name)
+            with idle_story_mutation(ws):
+                return configure_system_panel(ws, str(payload.get("mode") or "auto"))
+        except StoryTaskBusy as exc:
+            raise _http_error(exc, 409) from exc
         except Exception as exc:
             raise _http_error(exc) from exc
 
@@ -670,14 +764,15 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
     def finalized_chapters_update(name: str, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
         try:
             from training.adaptive_builder import set_chapter_finalized
-            finalized = set_chapter_finalized(
-                init_workspace(name),
-                str(payload.get("kind") or ""),
-                int(payload.get("volume") or 0),
-                int(payload.get("chapter") or 0),
-                bool(payload.get("finalized")),
-            )
+            ws = artifact_workspace(runtime.store.root, name)
+            with idle_story_mutation(ws):
+                finalized = set_chapter_finalized(
+                    ws, str(payload.get("kind") or ""), int(payload.get("volume") or 0),
+                    int(payload.get("chapter") or 0), bool(payload.get("finalized")),
+                )
             return {"finalized_chapters": finalized}
+        except StoryTaskBusy as exc:
+            raise _http_error(exc, 409) from exc
         except Exception as exc:
             raise _http_error(exc) from exc
 
@@ -809,7 +904,12 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
 
     @app.delete("/api/workspaces/{name}/drafts/writing-guide")
     def drafts_writing_guide_reset(name: str) -> dict[str, Any]:
-        return runtime.draft_chat.reset_writing_guide(name)
+        try:
+            return runtime.draft_chat.reset_writing_guide(name)
+        except StoryTaskBusy as exc:
+            raise _http_error(exc, 409) from exc
+        except ValueError as exc:
+            raise _http_error(exc) from exc
 
     @app.post("/api/workspaces/{name}/design/{scope}/generate")
     def design_generate(name: str, scope: str, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:

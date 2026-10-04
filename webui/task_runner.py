@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -17,6 +18,31 @@ from pathlib import Path
 from typing import Any
 
 from core.text_encoding import read_text_file
+
+
+def _stop_process_tree(process, grace_seconds=0):
+    """Allow CLI cleanup, then stop only this task's process tree."""
+    if grace_seconds:
+        try:
+            process.wait(timeout=grace_seconds)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW, timeout=5,
+            )
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if process.poll() is None:
+        process.kill()
 
 
 WORKSPACE_NAME_RE = re.compile(r"^[\w\u4e00-\u9fff][\w .\-\u4e00-\u9fff]{0,79}$", re.UNICODE)
@@ -943,20 +969,22 @@ class TaskManager:
                 raise KeyError(task_id)
             if task.status not in {"queued", "running", "stopping"}:
                 raise ValueError("当前任务已经结束，不能再次停止。")
+            (self.task_dir / f"{task.id}.cancel").touch()
             if task.status != "stopping":
                 task.status = "stopping"
                 task.message = "正在停止任务"
                 self._stop_requested.add(task_id)
                 self._persist_record(task)
             process = self._processes.get(task_id)
+            snapshot = self._public(task)
 
         self._append_log(task, "\n用户请求停止任务，正在结束当前进程...\n")
         if process is not None and process.poll() is None:
-            try:
-                process.terminate()
-            except OSError:
-                pass
-        return self._public(task)
+            threading.Thread(
+                target=_stop_process_tree, args=(process, 2), daemon=True,
+                name=f"stop-task-{task.id}",
+            ).start()
+        return snapshot
 
     def list(self, workspace: str | None = None) -> list[dict[str, Any]]:
         with self._lock:
@@ -1030,6 +1058,7 @@ class TaskManager:
             self._record_path(task_id),
             Path(task.log_path),
             self.task_dir / f"{task_id}.prompts.jsonl",
+            self.task_dir / f"{task_id}.cancel",
         ):
             if path.is_file():
                 path.unlink()
@@ -1105,6 +1134,7 @@ class TaskManager:
         reported_warning = False
         reference_rebuild_required = False
         provider_timeout = False
+        antigravity_failure = ""
 
         env = os.environ.copy()
         env["HARNESS_NOVEL_HOME"] = str(self.store.root)
@@ -1114,6 +1144,7 @@ class TaskManager:
         env["HARNESS_NOVEL_PROMPT_TRACE_FILE"] = str(
             self.task_dir / f"{task.id}.prompts.jsonl"
         )
+        env["HARNESS_NOVEL_CANCEL_FILE"] = str(self.task_dir / f"{task.id}.cancel")
         process: subprocess.Popen[str] | None = None
         try:
             process = subprocess.Popen(
@@ -1126,16 +1157,20 @@ class TaskManager:
                 env=env,
                 cwd=os.getcwd(),
                 bufsize=1,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                start_new_session=os.name != "nt",
             )
             with self._lock:
                 self._processes[task.id] = process
                 stop_after_start = task.id in self._stop_requested
             if stop_after_start and process.poll() is None:
-                process.terminate()
+                _stop_process_tree(process, grace_seconds=2)
             assert process.stdout is not None
             for line in iter(process.stdout.readline, ""):
                 if "HTTP 524" in line or "origin_response_timeout" in line:
                     provider_timeout = True
+                if "[LLMProvider] Antigravity 调用失败：" in line:
+                    antigravity_failure = line.split("Antigravity 调用失败：", 1)[1].strip()[:300]
                 if any(
                     marker in line
                     for marker in (
@@ -1149,6 +1184,7 @@ class TaskManager:
                     line.lstrip().startswith(("错误：", "Traceback"))
                     or "[LLMProvider] 调用失败" in line
                     or "[LLMProvider] 未配置 api_key" in line
+                    or "[LLMProvider] Antigravity 调用失败" in line
                 ):
                     reported_warning = True
                 self._append_log(task, self._redact_log(line))
@@ -1162,7 +1198,9 @@ class TaskManager:
                 elif exit_code != 0:
                     task.status = "failed"
                     task.message = (
-                        "参考小说已变化，请重新拆解"
+                        f"Antigravity：{antigravity_failure}"
+                        if antigravity_failure
+                        else "参考小说已变化，请重新拆解"
                         if reference_rebuild_required
                         else "模型服务商响应超时；已保留进度，请稍后继续"
                         if provider_timeout
@@ -1194,7 +1232,7 @@ class TaskManager:
         finally:
             if process is not None:
                 if process.poll() is None:
-                    process.terminate()
+                    _stop_process_tree(process)
                     try:
                         process.wait(timeout=5)
                     except subprocess.TimeoutExpired:

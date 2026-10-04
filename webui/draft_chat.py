@@ -11,7 +11,7 @@ from typing import Any
 
 from core.llm_provider import LLMCallCancelled, capture_llm_status
 from core.prompt_trace import capture_prompts
-from core.workspace import init_workspace
+from core.story_tasks import StoryTaskStopped, idle_story_mutation, release_story_task, reserve_story_task, story_task
 from webui.chapter_artifacts import artifact_workspace, batch_has_files, delete_batch_files
 
 
@@ -27,7 +27,7 @@ def _serializable_job(job: dict[str, Any]) -> dict[str, Any]:
     fields = (
         "id", "status", "phase", "completed", "total", "progress_kind",
         "message", "error", "prompt_count", "current_prompt_id", "prompt_model",
-        "prompt_created_at",
+        "prompt_created_at", "request", "generation",
     )
     data = {key: job.get(key) for key in fields if key in job}
     data["updated_at"] = datetime.now().isoformat(timespec="seconds")
@@ -70,7 +70,12 @@ class DraftChatManager:
     def _persist_job(self, workspace, volume, arc_idx, job):
         path = _job_state_path(self.root, workspace, volume, arc_idx)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(_serializable_job(job), ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(json.dumps(_serializable_job(job), ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _load_persisted_job(self, workspace, volume, arc_idx):
         path = _job_state_path(self.root, workspace, volume, arc_idx)
@@ -96,7 +101,7 @@ class DraftChatManager:
         return history
 
     def writing_guide_status(self, workspace):
-        ws = init_workspace(workspace)
+        ws = artifact_workspace(self.root, workspace)
         custom = Path(ws.file_system) / "writing" / "system_prompt.md"
         reference_sample = Path(ws.reference_sample)
         reference_chapters = Path(ws.reference_chapters) / "_volumes.json"
@@ -123,19 +128,21 @@ class DraftChatManager:
     def save_writing_guide(self, workspace, content, source_name):
         if not content.strip():
             raise ValueError("生文规范文件为空。")
-        ws = init_workspace(workspace)
-        target = Path(ws.file_system) / "writing" / "system_prompt.md"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content.strip() + "\n", encoding="utf-8")
-        meta = target.parent / "guide_meta.json"
-        meta.write_text(json.dumps({"source_name": source_name, "updated_at": datetime.now().isoformat(timespec="seconds")}, ensure_ascii=False, indent=2), encoding="utf-8")
+        ws = artifact_workspace(self.root, workspace)
+        with idle_story_mutation(ws):
+            target = Path(ws.file_system) / "writing" / "system_prompt.md"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content.strip() + "\n", encoding="utf-8")
+            meta = target.parent / "guide_meta.json"
+            meta.write_text(json.dumps({"source_name": source_name, "updated_at": datetime.now().isoformat(timespec="seconds")}, ensure_ascii=False, indent=2), encoding="utf-8")
         return self.writing_guide_status(workspace)
 
     def reset_writing_guide(self, workspace):
-        ws = init_workspace(workspace)
-        writing_dir = Path(ws.file_system) / "writing"
-        (writing_dir / "system_prompt.md").unlink(missing_ok=True)
-        (writing_dir / "guide_meta.json").unlink(missing_ok=True)
+        ws = artifact_workspace(self.root, workspace)
+        with idle_story_mutation(ws):
+            writing_dir = Path(ws.file_system) / "writing"
+            (writing_dir / "system_prompt.md").unlink(missing_ok=True)
+            (writing_dir / "guide_meta.json").unlink(missing_ok=True)
         return self.writing_guide_status(workspace)
 
     def start_message(
@@ -147,6 +154,17 @@ class DraftChatManager:
         if not display:
             raise ValueError("请输入内容后再发送。")
         key = (workspace, volume, arc_idx)
+        ws = artifact_workspace(self.root, workspace)
+        saved = self._load_persisted_job(workspace, volume, arc_idx) if resume_incomplete else None
+        if saved and saved.get("status") == "completed":
+            saved = None
+        request = dict((saved or {}).get("request") or {})
+        if not request:
+            previous = next((turn.get("content") for turn in reversed(self.get(workspace, volume, arc_idx).turns)
+                             if turn.get("role") == "user" and turn.get("content")), None)
+            request = {"instruction": previous if resume_incomplete and previous else display,
+                       "humanize": bool(humanize), "humanize_strength": humanize_strength}
+        generation = dict((saved or {}).get("generation") or {})
         with self._lock:
             old = self._jobs.get(key)
             if old and old["status"] in {"running", "pausing", "paused", "stopping"}:
@@ -160,12 +178,21 @@ class DraftChatManager:
                 "stop_event": stop, "cancel_event": cancel,
                 "prompt_history": [], "prompt_count": 0, "error": "",
             }
+            generation.setdefault("generation_id", str((saved or {}).get("id") or job["id"]))
+            job.update(request=request, generation=generation)
+            ticket = reserve_story_task(ws, job["id"])
             self._jobs[key] = job
-        self._persist_job(workspace, volume, arc_idx, job)
-        conv = self.get(workspace, volume, arc_idx)
-        if not resume_incomplete:
-            conv.turns.append({"role": "user", "content": display, "at": datetime.now().isoformat(timespec="seconds")})
-            conv.save()
+        try:
+            self._persist_job(workspace, volume, arc_idx, job)
+            conv = self.get(workspace, volume, arc_idx)
+            if not resume_incomplete:
+                conv.turns.append({"role": "user", "content": display, "at": datetime.now().isoformat(timespec="seconds")})
+                conv.save()
+        except Exception:
+            release_story_task(ticket)
+            with self._lock:
+                self._jobs.pop(key, None)
+            raise
 
         def update(phase, completed, total, detail):
             with self._lock:
@@ -199,28 +226,38 @@ class DraftChatManager:
             status_context = capture_llm_status(trace_status)
             trace_context.__enter__()
             status_context.__enter__()
+            lease = story_task(ws, ticket=ticket, pause_event=pause, stop_event=stop, on_wait=update)
+            acquired = False
             try:
+                lease.__enter__()
+                acquired = True
                 from training.adaptive_builder import (
                     _finalized_chapter_boundary, _list_novel_story_arcs, chapter_draft_resume_status,
                     gen_serial_chapters, route_chapter_draft_refinement,
                 )
-                ws = init_workspace(workspace)
                 arc = next((item for item in _list_novel_story_arcs(ws, volume) if item["idx"] == arc_idx), None)
                 if not arc:
                     raise ValueError("未找到故事情节单元。")
                 resume = chapter_draft_resume_status(ws, volume, arc_idx)
                 any_existing = resume["completed"] > 0
-                if resume_incomplete or not any_existing:
-                    start = resume.get("next_chapter") if resume_incomplete else arc["start_ch"]
-                    mode, instruction = ("resume" if resume_incomplete else "initial"), display
+                instruction = str(request.get("instruction") or display)
+                result = {"stopped": True, "artifacts": [], "adjustment_note": "已结束本轮正文调整。"}
+                if generation.get("start_chapter") is not None:
+                    start = int(generation["start_chapter"])
+                    mode = generation.get("mode") or "initial"
+                elif generation.get("mode") != "refine" and (resume_incomplete or not any_existing):
+                    start = (resume.get("next_chapter") or arc["start_ch"]) if resume_incomplete else arc["start_ch"]
+                    mode, refinement_mode = "initial", "regenerate"
                 else:
                     with self._lock:
                         self._jobs[key]["progress_kind"] = "serial_draft_refine"
+                        generation["mode"] = "refine"
+                        self._persist_job(workspace, volume, arc_idx, job)
                     update("routing", 0, resume["total"], "正在判断最早受影响章节")
                     while True:
                         try:
                             start, refinement_mode, reason = route_chapter_draft_refinement(
-                                ws, volume, arc_idx, display, cancel,
+                                ws, volume, arc_idx, instruction, cancel,
                             )
                             break
                         except LLMCallCancelled:
@@ -239,18 +276,26 @@ class DraftChatManager:
                                 ws, "drafts", volume, arc["start_ch"], arc["end_ch"],
                             ) + 1,
                         )
-                        mode, instruction = "refine", display
+                        mode = "refine"
                 if start is not None:
+                    if generation.get("start_chapter") is None:
+                        generation.update(
+                            mode=mode, start_chapter=start, end_chapter=arc["end_ch"],
+                            max_chapters=arc["end_ch"] - start + 1,
+                            humanize=bool(request.get("humanize", True)),
+                            humanize_strength=request.get("humanize_strength", "standard"),
+                            regenerate_existing=(mode == "refine"),
+                            refinement_mode=refinement_mode, writing_instruction=instruction,
+                        )
+                    with self._lock:
+                        job["generation"] = generation
+                        self._persist_job(workspace, volume, arc_idx, job)
                     result = gen_serial_chapters(
-                        ws, volume=volume, start_chapter=start, end_chapter=arc["end_ch"],
-                        max_chapters=arc["end_ch"] - start + 1,
-                        humanize=bool(humanize),
-                        humanize_strength=humanize_strength,
-                        regenerate_existing=(mode == "refine"),
-                        refinement_mode=(
-                            refinement_mode if mode == "refine" else "regenerate"
-                        ),
-                        writing_instruction=instruction,
+                        ws, volume=volume, **{k: v for k, v in generation.items() if k in {
+                            "start_chapter", "end_chapter", "max_chapters", "humanize", "humanize_strength",
+                            "regenerate_existing", "refinement_mode", "writing_instruction", "humanize_existing",
+                            "generation_id",
+                        }}, resume_checkpoint=bool(resume_incomplete),
                         progress_callback=update, pause_event=pause, stop_event=stop, cancel_event=cancel,
                     )
                 if not result:
@@ -264,6 +309,10 @@ class DraftChatManager:
                         stopped = bool(result.get("stopped"))
                         active.update(status="stopped" if stopped else "completed", phase="stopped" if stopped else "completed", message=note)
                         self._persist_job(workspace, volume, arc_idx, active)
+            except StoryTaskStopped:
+                with self._lock:
+                    job.update(status="stopped", phase="stopped", message="已取消排队任务，未修改正文。")
+                    self._persist_job(workspace, volume, arc_idx, job)
             except Exception as exc:
                 with self._lock:
                     active = self._jobs.get(key)
@@ -271,22 +320,39 @@ class DraftChatManager:
                         active.update(status="failed", phase="failed", message="生成失败", error=str(exc))
                         self._persist_job(workspace, volume, arc_idx, active)
             finally:
+                if acquired:
+                    lease.__exit__(None, None, None)
+                release_story_task(ticket)
                 status_context.__exit__(None, None, None)
                 trace_context.__exit__(None, None, None)
 
-        threading.Thread(target=worker, name=f"draft-chat-{volume}-{arc_idx}", daemon=True).start()
+        thread = threading.Thread(target=worker, name=f"draft-chat-{volume}-{arc_idx}", daemon=True)
+        try:
+            thread.start()
+        except Exception:
+            release_story_task(ticket)
+            with self._lock:
+                job.update(status="failed", phase="failed", error="无法启动正文后台任务。")
+                self._persist_job(workspace, volume, arc_idx, job)
+            raise
         return self.job_status(workspace, volume, arc_idx)
 
     def job_status(self, workspace, volume, arc_idx):
         with self._lock:
             job = self._jobs.get((workspace, volume, arc_idx))
             if job:
-                return {key: value for key, value in job.items() if key not in {"pause_event", "stop_event", "cancel_event", "prompt_history"}}
+                current = {key: value for key, value in job.items() if key not in {"pause_event", "stop_event", "cancel_event", "prompt_history"}}
+                if job.get("status") not in {"failed", "stopped"}:
+                    return current
+            else:
+                current = None
         from training.adaptive_builder import chapter_draft_resume_status
-        resume = chapter_draft_resume_status(init_workspace(workspace), volume, arc_idx)
-        persisted = self._load_persisted_job(workspace, volume, arc_idx)
+        resume = chapter_draft_resume_status(artifact_workspace(self.root, workspace), volume, arc_idx)
+        persisted = current or self._load_persisted_job(workspace, volume, arc_idx)
         if persisted:
             status = str(persisted.get("status") or "")
+            if persisted.get("request") and status != "completed":
+                resume["can_resume"] = True
             if status in {"running", "pausing", "paused", "stopping"}:
                 return {
                     **persisted,
@@ -296,7 +362,7 @@ class DraftChatManager:
                     "message": "上次正文任务意外中断，可从已保存章节继续。",
                     "error": persisted.get("error") or "程序或本地服务在任务完成前退出。",
                 }
-            if status == "failed":
+            if status in {"failed", "stopped"}:
                 return {**persisted, **resume}
         return {"status": "idle", "phase": "idle", "message": "", **resume}
 
@@ -323,6 +389,7 @@ class DraftChatManager:
             else:
                 job["stop_event"].set(); job["cancel_event"].set(); job["pause_event"].set()
                 job.update(status="stopping", phase="stopping", message="正在结束本轮生成")
+            self._persist_job(workspace, volume, arc_idx, job)
         return self.job_status(workspace, volume, arc_idx)
 
     def pause(self, *args): return self._control(*args, "pause")
@@ -330,20 +397,20 @@ class DraftChatManager:
     def stop(self, *args): return self._control(*args, "stop")
 
     def continue_incomplete(self, workspace, volume, arc_idx):
-        from training.adaptive_builder import chapter_draft_resume_status
-        if not chapter_draft_resume_status(init_workspace(workspace), volume, arc_idx).get("can_resume"):
+        if not self.job_status(workspace, volume, arc_idx).get("can_resume"):
             raise ValueError("当前故事情节没有可继续的未完成正文。")
         return self.start_message(workspace, volume, arc_idx, "继续生成未完成正文", True)
 
     def clear(self, workspace, volume, arc_idx):
-        conv = self.get(workspace, volume, arc_idx)
-        conv.turns = []; conv.save()
-        return {"cleared": True, "conversation": conv.history()}
+        with idle_story_mutation(artifact_workspace(self.root, workspace)):
+            conv = self.get(workspace, volume, arc_idx)
+            conv.turns = []; conv.save()
+            return {"cleared": True, "conversation": conv.history()}
 
     def reset(self, workspace, volume, arc_idx):
         """删除当前情节单元的正式正文、精修前快照、历史版本和最终版标记。"""
         key = (workspace, volume, arc_idx)
-        with self._lock:
+        with self._lock, idle_story_mutation(artifact_workspace(self.root, workspace)):
             if any(k[:2] == key[:2] and j.get("status") in {"running", "pausing", "paused", "stopping"}
                    for k, j in self._jobs.items()):
                 raise ValueError("当前故事情节正在生成正文，请先结束任务再重置。")

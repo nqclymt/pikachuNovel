@@ -17,6 +17,74 @@ class _Store:
 
 
 class TaskRunnerStopTests(unittest.TestCase):
+    def test_stop_cleans_up_descendant_that_keeps_stdout_open(self):
+        """An agy-like child must not outlive the stopped Python task."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            heartbeat = root / "heartbeat.txt"
+            child = root / "fake_agent.py"
+            child.write_text(
+                "import pathlib, sys, time\n"
+                "path = pathlib.Path(sys.argv[1])\n"
+                "for _ in range(400):\n"
+                "    with path.open('a') as stream: stream.write('x')\n"
+                "    time.sleep(.05)\n",
+                encoding="utf-8",
+            )
+            parent = root / "parent.py"
+            parent.write_text(
+                "import subprocess, sys\n"
+                "child = subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])\n"
+                "child.wait()\n",
+                encoding="utf-8",
+            )
+            manager = TaskManager(_Store(root), root / "tasks", uploads=None)
+            command = [sys.executable, str(parent), str(child), str(heartbeat)]
+            with patch.object(manager, "_build_command", return_value=command):
+                task = manager.create("workspace_init", "demo")
+            try:
+                deadline = time.monotonic() + 5
+                while not heartbeat.exists() and time.monotonic() < deadline:
+                    time.sleep(.02)
+                self.assertTrue(heartbeat.exists(), "descendant did not start")
+                manager.stop(task.id)
+                deadline = time.monotonic() + 8
+                while task.workspace in manager._active_workspaces and time.monotonic() < deadline:
+                    time.sleep(.02)
+                self.assertEqual(task.status, "stopped")
+                self.assertNotIn(task.workspace, manager._active_workspaces)
+                size = heartbeat.stat().st_size
+                time.sleep(.2)
+                self.assertEqual(heartbeat.stat().st_size, size)
+            finally:
+                process = manager._processes.get(task.id)
+                if process is not None:
+                    from webui.task_runner import _stop_process_tree
+                    _stop_process_tree(process)
+
+    def test_child_observes_cooperative_cancel_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = TaskManager(_Store(root), root / "tasks", uploads=None)
+            command = [sys.executable, "-c",
+                       "import os,pathlib,time; marker=pathlib.Path(os.environ['HARNESS_NOVEL_CANCEL_FILE']); "
+                       "print('ready', flush=True)\n"
+                       "while not marker.exists(): time.sleep(.02)\n"
+                       "print('cooperative cancellation', flush=True)"]
+            with patch.object(manager, "_build_command", return_value=command):
+                task = manager.create("workspace_init", "demo")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if Path(task.log_path).exists() and "ready" in Path(task.log_path).read_text(encoding="utf-8"):
+                    break
+                time.sleep(.02)
+            manager.stop(task.id)
+            deadline = time.monotonic() + 5
+            while task.workspace in manager._active_workspaces and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertEqual(task.status, "stopped")
+            self.assertIn("cooperative cancellation", Path(task.log_path).read_text(encoding="utf-8"))
+
     def test_child_process_chinese_output_remains_utf8(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

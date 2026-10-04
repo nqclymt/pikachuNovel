@@ -17,6 +17,8 @@ a = Analysis(
     datas=[
         (str(project_root / "webui" / "static"), "webui/static"),
         (str(project_root / "core" / "prompts"), "core/prompts"),
+        (str(project_root / "core" / "system_prompt.md"), "core"),
+        (str(project_root / "core" / "agents.md"), "core"),
     ] + webview_datas,
     hiddenimports=sorted(set(
         webview_hiddenimports + collect_submodules("uvicorn")

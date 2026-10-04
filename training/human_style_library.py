@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from core.prompt_loader import PromptLoader
-from core.llm_provider import LLMCallCancelled
+from core.llm_provider import LLMCallCancelled, LLMExecutionBlocked
 from core.text_encoding import read_text_file
 from core.text_utils import normalize_text, parse_json_response
 from training.style_engine_v2 import (
@@ -615,7 +615,7 @@ def build_human_style_library(
     print(f"  正在从 {len(representative)} 个跨场景连续样本提炼高级作者文笔画像...")
     try:
         profile = _generate_profile(llm, representative, metrics, cancel_event=cancel_event)
-    except LLMCallCancelled:
+    except (LLMCallCancelled, LLMExecutionBlocked):
         raise
     except Exception as exc:  # noqa: BLE001 - advanced profile is optional enhancement
         profile_payload["profile_error"] = type(exc).__name__

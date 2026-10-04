@@ -4,6 +4,8 @@ __pycache__/
 *.pyc
 .env
 novels
+/my-novels/
+/my-novels-test/
 dist/
 build/
 release/

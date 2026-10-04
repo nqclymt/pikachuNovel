@@ -38,6 +38,9 @@ def chapter_files(fs: Path, volume: int) -> dict[str, dict[int, list[Path]]]:
         ("drafts", fs / "drafts" / vol / "raw_chapters", r"(\d+)_第\d+章\.raw\.md"),
         ("drafts", fs / "drafts" / vol / "raw_chapters" / "versions", r"(\d+)_第\d+章_.+\.raw\.md"),
         ("drafts", fs / "drafts" / vol / "editor_reviews", r"chapter_(\d+)_.+\.json"),
+        ("drafts", fs / "drafts" / vol / "checkpoints", r"chapter_(\d+)\.json"),
+        ("drafts", fs / "drafts" / vol / "candidates", r"chapter_(\d+)\.md"),
+        ("drafts", fs / "drafts" / vol / "acceptance", r"chapter_(\d+)\.json"),
     ]
     result: dict[str, dict[int, list[Path]]] = {"outlines": {}, "drafts": {}}
     for kind, directory, pattern in layouts:

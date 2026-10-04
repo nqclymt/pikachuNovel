@@ -13,9 +13,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from core.workspace import init_workspace
 from core.prompt_trace import capture_prompts
 from core.llm_provider import capture_llm_status
+from core.story_tasks import StoryTaskStopped, idle_story_mutation, release_story_task, reserve_story_task, story_task
 from webui.chapter_artifacts import artifact_workspace, batch_has_files, delete_batch_files
 
 
@@ -45,6 +45,10 @@ def _chapter_outlines_exist(ws, volume: int, arc_idx: int) -> bool:
 def _conversation_path(root: Path, workspace: str, volume: int, arc_idx: int) -> Path:
     return (root / workspace / "file_system" / "chapter_outlines"
             / f"vol_{volume:02d}" / f"conversation_arc_{arc_idx}.json")
+
+
+def _job_state_path(root, workspace, volume, arc_idx):
+    return _conversation_path(root, workspace, volume, arc_idx).with_name(f"job_arc_{arc_idx}.json")
 
 
 class ChapterOutlineConversation:
@@ -102,6 +106,26 @@ class ChapterOutlineChatManager:
         self._jobs: dict[tuple[str, int, int], dict[str, Any]] = {}
         self._jobs_lock = threading.Lock()
 
+    def _persist_job(self, workspace, volume, arc_idx, job):
+        fields = ("id", "status", "phase", "completed", "total", "progress_kind", "message", "error", "request", "result")
+        data = {key: job[key] for key in fields if key in job}
+        data["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        path = _job_state_path(self.root, workspace, volume, arc_idx)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _load_persisted_job(self, workspace, volume, arc_idx):
+        try:
+            data = json.loads(_job_state_path(self.root, workspace, volume, arc_idx).read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
+        except (OSError, ValueError):
+            return None
+
     def get(self, workspace: str, volume: int, arc_idx: int) -> ChapterOutlineConversation:
         key = (workspace, volume, arc_idx)
         if key not in self._cache:
@@ -120,6 +144,15 @@ class ChapterOutlineChatManager:
         display_text = message.strip()
         if not display_text:
             raise ValueError("请输入内容后再发送。")
+        ws = artifact_workspace(self.root, workspace)
+        saved = self._load_persisted_job(workspace, volume, arc_idx) if resume_incomplete else None
+        if saved and saved.get("status") == "completed":
+            saved = None
+        request = dict((saved or {}).get("request") or {})
+        if not request:
+            previous = next((turn.get("content") for turn in reversed(self.get(workspace, volume, arc_idx).turns)
+                             if turn.get("role") == "user" and turn.get("content")), None)
+            request = {"instruction": previous if resume_incomplete and previous else display_text}
         with self._jobs_lock:
             current = self._jobs.get(key)
             if current and current["status"] in {"running", "pausing", "paused", "stopping"}:
@@ -135,11 +168,20 @@ class ChapterOutlineChatManager:
                 "stop_event": stop_event, "cancel_event": cancel_event,
                 "prompt_history": [], "prompt_count": 0, "error": "",
             }
+            job["request"] = request
+            ticket = reserve_story_task(ws, job["id"])
             self._jobs[key] = job
-        conv = self.get(workspace, volume, arc_idx)
-        if not resume_incomplete:
-            conv.append_user(display_text)
-            conv.save()
+        try:
+            self._persist_job(workspace, volume, arc_idx, job)
+            conv = self.get(workspace, volume, arc_idx)
+            if not resume_incomplete:
+                conv.append_user(display_text)
+                conv.save()
+        except Exception:
+            release_story_task(ticket)
+            with self._jobs_lock:
+                self._jobs.pop(key, None)
+            raise
 
         def update(phase: str, completed: int, total: int, detail: str) -> None:
             with self._jobs_lock:
@@ -150,6 +192,7 @@ class ChapterOutlineChatManager:
                     phase=phase, completed=completed, total=total, message=detail,
                     status="paused" if phase == "paused" else active["status"],
                 )
+                self._persist_job(workspace, volume, arc_idx, active)
 
         def worker() -> None:
             def trace_prompt(event: dict) -> None:
@@ -170,16 +213,23 @@ class ChapterOutlineChatManager:
                     active = self._jobs.get(key)
                     if active and active["id"] == job["id"]:
                         active["message"] = message.removeprefix("[LLMProvider] ")
+                        self._persist_job(workspace, volume, arc_idx, active)
             trace_context = capture_prompts(trace_prompt)
             status_context = capture_llm_status(trace_status)
             trace_context.__enter__()
             status_context.__enter__()
+            lease = story_task(ws, ticket=ticket, pause_event=pause_event, stop_event=stop_event, on_wait=update)
+            acquired = False
             try:
-                ws = init_workspace(workspace)
+                lease.__enter__()
+                acquired = True
                 from training.adaptive_builder import (
                     gen_chapter_outlines_for_arc, refine_chapter_outlines_serial,
                 )
-                initial = resume_incomplete or not _chapter_outlines_exist(ws, volume, arc_idx)
+                initial = request.get("mode") != "refine" and (
+                    resume_incomplete or not _chapter_outlines_exist(ws, volume, arc_idx))
+                request["mode"] = "initial" if initial else "refine"
+                self._persist_job(workspace, volume, arc_idx, job)
                 if initial:
                     result = gen_chapter_outlines_for_arc(
                         ws, volume, arc_idx, progress_callback=update,
@@ -193,7 +243,7 @@ class ChapterOutlineChatManager:
                         if active and active["id"] == job["id"]:
                             active["progress_kind"] = "serial_chapter_refine"
                     result = refine_chapter_outlines_serial(
-                        ws, volume, arc_idx, display_text, progress_callback=update,
+                        ws, volume, arc_idx, str(request.get("instruction") or display_text), progress_callback=update,
                         pause_event=pause_event, stop_event=stop_event,
                         cancel_event=cancel_event,
                     )
@@ -214,33 +264,60 @@ class ChapterOutlineChatManager:
                             phase="stopped" if stopped else "completed",
                             message=note, result={"mode": mode},
                         )
+                        self._persist_job(workspace, volume, arc_idx, active)
+            except StoryTaskStopped:
+                with self._jobs_lock:
+                    job.update(status="stopped", phase="stopped", message="已取消排队任务，未修改章纲。")
+                    self._persist_job(workspace, volume, arc_idx, job)
             except Exception as exc:
                 with self._jobs_lock:
                     active = self._jobs.get(key)
                     if active and active["id"] == job["id"]:
                         active.update(status="failed", phase="failed", message="生成失败", error=str(exc))
+                        self._persist_job(workspace, volume, arc_idx, active)
             finally:
+                if acquired:
+                    lease.__exit__(None, None, None)
+                release_story_task(ticket)
                 status_context.__exit__(None, None, None)
                 trace_context.__exit__(None, None, None)
 
-        threading.Thread(
+        thread = threading.Thread(
             target=worker, name=f"chapters-chat-{volume}-{arc_idx}", daemon=True,
-        ).start()
+        )
+        try:
+            thread.start()
+        except Exception:
+            release_story_task(ticket)
+            with self._jobs_lock:
+                job.update(status="failed", phase="failed", error="无法启动章纲后台任务。")
+                self._persist_job(workspace, volume, arc_idx, job)
+            raise
         return self.job_status(workspace, volume, arc_idx)
 
     def job_status(self, workspace: str, volume: int, arc_idx: int) -> dict[str, Any]:
         with self._jobs_lock:
             job = self._jobs.get((workspace, volume, arc_idx))
             if job:
-                return {
+                current = {
                     k: v for k, v in job.items()
                     if k not in {"pause_event", "stop_event", "cancel_event", "prompt_history"}
                 }
+                if job.get("status") not in {"failed", "stopped"}:
+                    return current
+            else:
+                current = None
         from training.adaptive_builder import chapter_outline_resume_status
-        return {
-            "status": "idle", "phase": "idle", "message": "",
-            **chapter_outline_resume_status(init_workspace(workspace), volume, arc_idx),
-        }
+        resume = chapter_outline_resume_status(artifact_workspace(self.root, workspace), volume, arc_idx)
+        persisted = current or self._load_persisted_job(workspace, volume, arc_idx)
+        if persisted and persisted.get("status") != "completed":
+            if persisted.get("request"):
+                resume["can_resume"] = True
+            if persisted.get("status") in {"running", "pausing", "paused", "stopping"}:
+                return {**persisted, **resume, "status": "interrupted", "phase": "interrupted",
+                        "message": "上次章纲任务意外中断，可按原指令继续。"}
+            return {**persisted, **resume}
+        return {"status": "idle", "phase": "idle", "message": "", **resume}
 
     def prompts(self, workspace: str, volume: int, arc_idx: int) -> dict[str, Any]:
         with self._jobs_lock:
@@ -251,8 +328,7 @@ class ChapterOutlineChatManager:
             }
 
     def continue_incomplete(self, workspace: str, volume: int, arc_idx: int) -> dict[str, Any]:
-        from training.adaptive_builder import chapter_outline_resume_status
-        resume = chapter_outline_resume_status(init_workspace(workspace), volume, arc_idx)
+        resume = self.job_status(workspace, volume, arc_idx)
         if not resume.get("can_resume"):
             raise ValueError("当前情节单元没有可继续的未完成章纲。")
         return self.start_message(
@@ -268,6 +344,7 @@ class ChapterOutlineChatManager:
             job["pause_event"].clear()
             job["cancel_event"].set()
             job.update(status="pausing", message="正在暂停当前模型请求")
+            self._persist_job(workspace, volume, arc_idx, job)
         return self.job_status(workspace, volume, arc_idx)
 
     def resume(self, workspace: str, volume: int, arc_idx: int) -> dict[str, Any]:
@@ -279,6 +356,7 @@ class ChapterOutlineChatManager:
             job["cancel_event"].clear()
             job["pause_event"].set()
             job.update(status="running", phase="generating", message="已继续生成")
+            self._persist_job(workspace, volume, arc_idx, job)
         return self.job_status(workspace, volume, arc_idx)
 
     def stop(self, workspace: str, volume: int, arc_idx: int) -> dict[str, Any]:
@@ -291,10 +369,15 @@ class ChapterOutlineChatManager:
             job["cancel_event"].set()
             job["pause_event"].set()
             job.update(status="stopping", phase="stopping", message="正在结束本轮生成")
+            self._persist_job(workspace, volume, arc_idx, job)
         return self.job_status(workspace, volume, arc_idx)
 
     def run_message(self, workspace: str, volume: int, arc_idx: int, message: str) -> dict[str, Any]:
-        ws = init_workspace(workspace)
+        with story_task(artifact_workspace(self.root, workspace)):
+            return self._run_message_locked(workspace, volume, arc_idx, message)
+
+    def _run_message_locked(self, workspace: str, volume: int, arc_idx: int, message: str) -> dict[str, Any]:
+        ws = artifact_workspace(self.root, workspace)
         conv = self.get(workspace, volume, arc_idx)
         display_text = message.strip()
         if not display_text:
@@ -324,7 +407,7 @@ class ChapterOutlineChatManager:
     def reset(self, workspace: str, volume: int, arc_idx: int) -> dict[str, Any]:
         """清空对话，并删除该情节单元的章纲及对应系统面板快照。"""
         key = (workspace, volume, arc_idx)
-        with self._jobs_lock:
+        with self._jobs_lock, idle_story_mutation(artifact_workspace(self.root, workspace)):
             if any(k[:2] == key[:2] and j.get("status") in {"running", "pausing", "paused", "stopping"}
                    for k, j in self._jobs.items()):
                 raise ValueError("当前章纲仍在生成，请先结束任务再重置。")
@@ -335,10 +418,12 @@ class ChapterOutlineChatManager:
             conv = self.get(workspace, volume, arc_idx)
             conv.clear()
             self._jobs.pop(key, None)
+            _job_state_path(self.root, workspace, volume, arc_idx).unlink(missing_ok=True)
             return {"reset": True, "deleted": batch["deleted"], "chapters": batch["chapters"],
                     "conversation": conv.history()}
 
     def clear(self, workspace: str, volume: int, arc_idx: int) -> dict[str, Any]:
-        conv = self.get(workspace, volume, arc_idx)
-        conv.clear()
-        return {"cleared": True, "conversation": conv.history()}
+        with idle_story_mutation(artifact_workspace(self.root, workspace)):
+            conv = self.get(workspace, volume, arc_idx)
+            conv.clear()
+            return {"cleared": True, "conversation": conv.history()}

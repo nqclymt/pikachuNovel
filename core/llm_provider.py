@@ -18,10 +18,16 @@ _WAIT_LOG_INTERVAL = 10.0
 _STATUS_CALLBACK = ContextVar("harness_novel_llm_status_callback", default=None)
 WIRE_API_CHAT = "chat_completions"
 WIRE_API_RESPONSES = "responses"
+BACKEND_OPENAI = "openai"
+BACKEND_ANTIGRAVITY = "antigravity_cli"
 
 
 class LLMCallCancelled(RuntimeError):
     """模型请求被用户主动取消。"""
+
+
+class LLMExecutionBlocked(RuntimeError):
+    """Provider authentication/quota requires user action before work resumes."""
 
 
 class LLMResponseFormatError(RuntimeError):
@@ -38,6 +44,20 @@ class LLMCallFailed(RuntimeError):
         super().__init__(
             f"模型 {model} 调用失败，已尝试 {attempts} 次：{_error_summary(error)}"
         )
+
+
+def normalize_backend(value) -> str:
+    backend = str(value or BACKEND_OPENAI).strip().lower()
+    if backend not in {BACKEND_OPENAI, BACKEND_ANTIGRAVITY}:
+        raise ValueError(f"不支持的模型后端：{value}")
+    return backend
+
+
+def provider_configured(config) -> bool:
+    """CLI uses its own login; only API transports require a key."""
+    if normalize_backend(config.get("backend")) == BACKEND_ANTIGRAVITY:
+        return True
+    return bool(config.get("api_key") or os.getenv("OPENAI_API_KEY"))
 
 
 def normalize_wire_api(value, default=WIRE_API_CHAT) -> str:
@@ -206,7 +226,7 @@ def _report_status(message: str) -> None:
 
 
 class LLMProvider:
-    """OpenAI 兼容接口的轻量封装。
+    """统一的 OpenAI 兼容接口与官方 Antigravity CLI 入口。
 
     只负责真实 API 调用与有界重试；调用失败时抛出明确异常，避免上层把
     API 故障误判成模型格式错误并继续重复请求。
@@ -219,12 +239,20 @@ class LLMProvider:
         api_key=None,
         max_tokens=None,
         wire_api=WIRE_API_CHAT,
+        backend=BACKEND_OPENAI,
+        cli_path="",
+        cli_agent="",
+        cli_effort="medium",
     ):
+        self.backend = normalize_backend(backend)
         self.model = model
         self.base_url = base_url
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.api_key = (api_key or os.getenv("OPENAI_API_KEY")) if self.backend == BACKEND_OPENAI else None
         self.max_tokens = max_tokens
         self.wire_api = normalize_wire_api(wire_api)
+        self.cli_path = cli_path
+        self.cli_agent = cli_agent
+        self.cli_effort = cli_effort or "medium"
         try:
             self.timeout = max(
                 30.0,
@@ -233,6 +261,27 @@ class LLMProvider:
         except (TypeError, ValueError):
             self.timeout = 600.0
         self.client = self._create_client() if self.api_key else None
+
+    def _generate_cli(self, prompt, is_json, cancel_event=None):
+        # No SDK retries or fallback to a paid API. The CLI scheduler handles
+        # account limits and all callers see the original actionable failure.
+        from core.antigravity import AntigravityError, run_antigravity
+
+        try:
+            return normalize_text(run_antigravity(
+                prompt,
+                model="" if self.model == "mock-model" else self.model,
+                cli_path=self.cli_path,
+                cli_agent=self.cli_agent,
+                cli_effort=self.cli_effort,
+                timeout=self.timeout,
+                is_json=is_json,
+                cancel_event=cancel_event,
+                status_callback=_report_status,
+            ))
+        except AntigravityError as exc:
+            _report_status(f"[LLMProvider] Antigravity 调用失败：{exc}")
+            raise
 
     def _create_client(self):
         return OpenAI(
@@ -274,10 +323,12 @@ class LLMProvider:
     def generate(self, prompt, temperature=0.7, is_json=False, max_retries=2, max_tokens=None):
         """调用大语言模型生成内容。
 
-        成功返回归一化后的文本；未配置 api_key 或 API 调用失败（重试耗尽 /
-        401/402/403 等确定性错误）时返回空字符串并打印警告。
+        成功返回归一化后的文本；API 后端未配置密钥时返回空字符串。
+        调用失败抛出异常，CLI 配额或认证失败不自动重试。
         """
         record_prompt(prompt, self.model)
+        if self.backend == BACKEND_ANTIGRAVITY:
+            return self._generate_cli(prompt, is_json)
         if not self.client:
             print("[LLMProvider] 未配置 api_key，无法调用模型，返回空内容。")
             return ""
@@ -338,6 +389,8 @@ class LLMProvider:
     ):
         """执行可取消、可重试的请求；取消后不会返回未完成内容。"""
         record_prompt(prompt, self.model)
+        if self.backend == BACKEND_ANTIGRAVITY:
+            return self._generate_cli(prompt, is_json, cancel_event)
         if not self.api_key:
             return ""
         max_retries = _resolve_max_retries(max_retries)

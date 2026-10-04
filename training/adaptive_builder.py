@@ -8,12 +8,19 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from core.llm_provider import LLMCallCancelled, LLMProvider
+from core.llm_provider import (
+    BACKEND_ANTIGRAVITY, LLMCallCancelled, LLMExecutionBlocked, LLMProvider,
+    normalize_backend, provider_configured,
+)
 from core.prompt_loader import PromptLoader
 from core.config import ConfigLoader
 from core.text_encoding import read_text_file
 from core.text_utils import normalize_text, parse_json_response
 from core.workspace import init_workspace
+from core.writing_requirements import read_default_writing_guide, compose_writing_requirements
+from core.story_memory import previous_chapter_paths, previous_panel_path
+from core.chapter_checkpoints import guarded_knowledge_repairs, load_checkpoint, digest
+from core.story_tasks import serialized_story_task
 from core.adaptation import (
     append_adaptation_report,
     format_forbidden_terms,
@@ -102,9 +109,7 @@ def _normalize_stage_roadmap(text):
 
 def _get_llm():
     config = ConfigLoader.get_adaptive_builder_config()
-    if not config.get("api_key"):
-        config["api_key"] = os.getenv("OPENAI_API_KEY")
-    if not config.get("api_key"):
+    if not provider_configured(config):
         print("错误：未检测到 API Key。")
         return None
     return LLMProvider(**config)
@@ -115,9 +120,7 @@ def _get_lite_llm():
     config = ConfigLoader.get_adaptive_builder_lite_config()
     if not config:
         config = ConfigLoader.get_adaptive_builder_config()
-    if not config.get("api_key"):
-        config["api_key"] = os.getenv("OPENAI_API_KEY")
-    if not config.get("api_key"):
+    if not provider_configured(config):
         print("错误：未检测到 API Key。")
         return None
     return LLMProvider(**config)
@@ -127,17 +130,24 @@ def _get_humanize_llm():
     """Use a dedicated naturalization model when configured; otherwise inherit the drafting model."""
     human = ConfigLoader.get_humanize_builder_config()
     lite = ConfigLoader.get_adaptive_builder_lite_config()
-    explicitly_configured = any(human.get(key) for key in ("model", "base_url", "api_key"))
+    human_backend = normalize_backend(human.get("backend"))
+    explicitly_configured = human_backend == BACKEND_ANTIGRAVITY or any(
+        human.get(key) for key in ("model", "base_url", "api_key")
+    )
     if not explicitly_configured:
         config = dict(lite)
+    elif human_backend == BACKEND_ANTIGRAVITY or human_backend != normalize_backend(lite.get("backend")):
+        # Different transports must not inherit model names, endpoints, or
+        # credentials from each other (e.g. a gateway model into agy). An
+        # explicitly selected CLI role also honors its own blank/default fields.
+        config = dict(human)
     else:
         config = dict(lite)
-        for key in ("model", "base_url", "api_key", "wire_api"):
+        for key in ("model", "base_url", "api_key", "wire_api", "backend",
+                    "cli_path", "cli_agent", "cli_effort"):
             if human.get(key):
                 config[key] = human[key]
-    if not config.get("api_key"):
-        config["api_key"] = os.getenv("OPENAI_API_KEY")
-    if not config.get("api_key"):
+    if not provider_configured(config):
         print("Error: no API key configured for chapter naturalization.")
         return None
     return LLMProvider(**config)
@@ -586,7 +596,7 @@ def _naturalize_chapter_locally(llm, chapter_text, profile, writing_guide, stren
 def _read_file(path):
     if not os.path.exists(path):
         return None
-    content = read_text_file(path)[0].strip()
+    content = read_text_file(path)[0].replace("\r\n", "\n").replace("\r", "\n").strip()
     return content if content else None
 
 
@@ -1664,7 +1674,8 @@ def _ensure_system_panel_decision(ws, cancel_event=None):
 def _previous_system_panel(ws, volume, chapter_num):
     if not system_panel_status(ws)["enabled"]:
         return {"enabled": False, "chapter": max(0, chapter_num - 1), "panel": {}}
-    previous = _read_json_file(_system_panel_chapter_path(ws, volume, chapter_num - 1))
+    previous_path = previous_panel_path(ws, volume, chapter_num)
+    previous = _read_json_file(str(previous_path)) if previous_path else None
     if previous:
         return {
             "chapter": previous.get("chapter", max(0, chapter_num - 1)),
@@ -4086,10 +4097,13 @@ def _visible_char_count(text):
     return len(re.sub(r"\s+", "", text or ""))
 
 
-def _generate_with_cancel(llm, prompt, cancel_event=None, temperature=0.7):
+def _generate_with_cancel(llm, prompt, cancel_event=None, temperature=0.7, is_json=False):
+    options = {"temperature": temperature}
+    if is_json:
+        options["is_json"] = True
     if cancel_event is not None and hasattr(llm, "generate_cancelable"):
-        return llm.generate_cancelable(prompt, cancel_event, temperature=temperature)
-    return llm.generate(prompt, temperature=temperature)
+        return llm.generate_cancelable(prompt, cancel_event, **options)
+    return llm.generate(prompt, **options)
 
 
 def _compact_story_arc_result(llm, result, arc_idx, start_ch, end_ch, target_char_count,
@@ -4958,6 +4972,7 @@ def _cap_story_line_in_outline(text, limit=STORY_LINE_LIMIT):
     return "\n".join(new_lines)
 
 
+@serialized_story_task
 def gen_serial_chapter_outlines(ws, volume=1, force=False):
     """基于已生成的新书故事情节单元，串行生成本卷逐章章纲。"""
     context = _load_volume_outline_context(ws, volume)
@@ -5069,6 +5084,7 @@ def chapter_outline_resume_status(ws, volume, arc_idx):
     }
 
 
+@serialized_story_task
 def gen_chapter_outlines_for_arc(ws, volume, arc_idx, progress_callback=None,
                                  pause_event=None, stop_event=None, cancel_event=None):
     """为指定舞台/卷的单个故事情节单元生成逐章章纲。"""
@@ -5148,9 +5164,14 @@ def gen_chapter_outlines_for_arc(ws, volume, arc_idx, progress_callback=None,
             pause_event.wait()
         if stop_event is not None and stop_event.is_set():
             break
-        previous_text = _read_file(
-            os.path.join(ch_out_dir, f"chapter_{ch_num - 1:03d}.md")
-        ) if ch_num > 1 else ""
+        from pathlib import Path
+        prior_outlines = []
+        for path in (Path(ws.file_system) / "chapter_outlines").glob("vol_*/chapter_*.md"):
+            vm = re.fullmatch(r"vol_(\d+)", path.parent.name)
+            cm = re.fullmatch(r"chapter_(\d+)\.md", path.name)
+            if vm and cm and (int(vm[1]), int(cm[1])) < (volume, ch_num):
+                prior_outlines.append(((int(vm[1]), int(cm[1])), path))
+        previous_text = _read_file(str(max(prior_outlines)[1])) if prior_outlines else ""
         previous_text = re.sub(
             r'\n?\[(?:FINISHED|CONTINUE)\]\s*$', '', previous_text or "",
         ).strip() or "（这是第一章，无上一章章纲）"
@@ -5258,6 +5279,7 @@ def _route_chapter_outline_refinement(llm, outlines, instruction, start_ch, end_
     return routed_chapter, mode, reason
 
 
+@serialized_story_task
 def refine_chapter_outlines_serial(ws, volume, arc_idx, instruction, progress_callback=None,
                                    pause_event=None, stop_event=None, cancel_event=None):
     """路由最早受影响章节，并从该章串行重生成到情节单元末章。"""
@@ -5543,8 +5565,8 @@ def _write_generated_chapter(path, content):
     os.makedirs(directory, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".draft-", suffix=".tmp", dir=directory)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content.rstrip() + "\n")
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content.replace("\r\n", "\n").replace("\r", "\n").rstrip() + "\n")
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
@@ -5739,14 +5761,18 @@ def _humanize_chapter_text(
     chapter_outline="",
     story_arc="",
     recent_context="",
+    writing_instruction="",
+    writing_requirements=None,
+    return_report=False,
 ):
     _backup_raw_chapter(ws, volume, chapter_num, chapter_text)
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     library_ready = human_style_library_status(ws.reference).get("ready", False)
     writing_guide = _read_file(os.path.join(ws.file_system, "writing", "system_prompt.md")) or ""
     if not writing_guide and not library_ready:
-        writing_guide = _read_file(os.path.join(project_root, "core", "system_prompt.md")) or ""
+        writing_guide = read_default_writing_guide()
     writing_guide = writing_guide or "Preserve the supplied scene examples' narrative mechanics and all story facts."
+    writing_guide = writing_requirements or compose_writing_requirements(writing_guide, writing_instruction)
     result, report = edit_chapter_prose(
         llm, chapter_text, chapter_outline=chapter_outline, story_arc=story_arc,
         recent_context=recent_context, writing_guide=writing_guide,
@@ -5774,30 +5800,32 @@ def _humanize_chapter_text(
     print(f"     编辑审读记录：{trace_path}")
     # Do not follow a local edit with the legacy whole-chapter style repair. That erased the
     # reference voice and could discard an otherwise valid chapter for normal punctuation.
-    return result
+    return (result, report) if return_report else result
 
 
 def _audit_generated_chapter_knowledge(llm, chapter_num, chapter_text,
-                                       chapter_outline, retrieval, cancel_event=None):
+                                        chapter_outline, retrieval, cancel_event=None,
+                                        writing_requirements=""):
     """只审查本章命中的事实；未命中时不额外调用模型。"""
     hits = retrieval.get("hits") if isinstance(retrieval, dict) else []
     if not hits:
         return {"status": "skipped", "reason": "本章未命中明确事实条目", "rewrite": False}
-    facts = retrieval.get("context") or "\n\n".join(
-        f"【{item.get('section')} / {item.get('heading')}】\n{item.get('excerpt', '')}"
-        for item in hits
-    )
+    fact_catalog = {f"fact_{index}": str(item.get("excerpt") or item.get("text") or "")
+                    for index, item in enumerate(hits, 1)}
+    fact_catalog = {key: value for key, value in fact_catalog.items() if value.strip()}
+    facts = "\n\n".join(f"【{key}】\n{value}" for key, value in fact_catalog.items())
     prompt = PromptLoader.load(
         "knowledge_consistency_audit",
         chapter_num=chapter_num,
         chapter_outline=chapter_outline,
         chapter_text=chapter_text,
         retrieved_facts=facts,
+        writing_requirements=writing_requirements,
     )
     try:
         raw = normalize_text(_generate_with_cancel(llm, prompt, cancel_event, temperature=0.1))
         audit = parse_json_response(raw)
-    except LLMCallCancelled:
+    except (LLMCallCancelled, LLMExecutionBlocked):
         raise
     except Exception as exc:
         return {"status": "error", "reason": str(exc), "rewrite": False}
@@ -5814,26 +5842,20 @@ def _audit_generated_chapter_knowledge(llm, chapter_num, chapter_text,
                 "original": original,
                 "replacement": replacement,
                 "fact": str(item.get("fact") or "").strip(),
+                "fact_id": str(item.get("fact_id") or "").strip(),
             })
     audit["corrections"] = corrections
+    audit["fact_catalog"] = fact_catalog
     audit["rewrite"] = audit.get("status") == "conflict" and bool(corrections)
     return audit
 
 
 def _repair_chapter_knowledge(chapter_text, audit):
     """按审计给出的原文片段做单次精确替换，禁止整章二次改写。"""
-    result = chapter_text
-    applied = []
-    for correction in audit.get("corrections") or []:
-        original = correction["original"]
-        if original not in result:
-            continue
-        candidate = result.replace(original, correction["replacement"], 1)
-        result = candidate
-        applied.append(correction)
-    return result, applied
+    return guarded_knowledge_repairs(chapter_text, audit)
 
 
+@serialized_story_task
 def gen_serial_chapters(
     ws,
     volume=1,
@@ -5850,6 +5872,8 @@ def gen_serial_chapters(
     pause_event=None,
     stop_event=None,
     cancel_event=None,
+    resume_checkpoint=False,
+    generation_id="",
 ):
     """串行生成正文：以情节单元、章纲、前文、章级面板和写作规范生成下一章。"""
     # 项目根目录
@@ -5858,11 +5882,11 @@ def gen_serial_chapters(
     context = _load_volume_outline_context(ws, volume)
     if not context:
         return
-    # 语言风格优先级：人工参考小说 > 用户自定义规范 > 项目默认规范。
+    # 本轮要求 > 用户持久规范 > 人工参考风格；事实不能被文风要求改写。
     # 默认 system_prompt 只在没有人工文笔库时作为兜底，避免把不同作者洗成统一模板。
     custom_style_path = os.path.join(ws.file_system, "writing", "system_prompt.md")
     custom_style_guide = _read_file(custom_style_path) or ""
-    default_style_guide = _read_file(os.path.join(_root, "core", "system_prompt.md")) or ""
+    default_style_guide = read_default_writing_guide()
     agents_md = _read_file(os.path.join(_root, "core", "agents.md")) or ""
 
     style_library = human_style_library_status(ws.reference)
@@ -5892,7 +5916,7 @@ def gen_serial_chapters(
         if agents_md:
             writing_rules = f"{writing_rules}\n\n{agents_md}"
         print(
-            "  -> 语言风格采用人工文笔库最高优先级；"
+            "  -> 语言风格参考人工文笔库，优先服从本轮要求和用户规范；"
             "项目默认 system_prompt 不参与句式、段长、视角和章末节奏控制。"
         )
     else:
@@ -5902,6 +5926,8 @@ def gen_serial_chapters(
             "  -> 人工文笔库不可用，暂用："
             f"{'工作区生文规范' if custom_style_guide else 'core/system_prompt.md'}。"
         )
+
+    writing_rules = compose_writing_requirements(writing_rules, writing_instruction)
 
     # 扫描章纲
     outlines_dir = os.path.join(ws.file_system, "chapter_outlines", f"vol_{volume:02d}")
@@ -5952,32 +5978,6 @@ def gen_serial_chapters(
     else:
         print("  -> 人工文笔库尚未建立；本次暂时回退到旧的参考章节锚点。")
 
-    def humanize_with_controls(ch_num, text, completed, total, style_anchor="",
-                               chapter_outline="", story_arc="", recent_context=""):
-        while True:
-            try:
-                return _humanize_chapter_text(
-                    humanize_llm, ws, volume, ch_num, text,
-                    cancel_event=cancel_event,
-                    strength=humanize_strength,
-                    chapter_outline=chapter_outline, story_arc=story_arc,
-                    recent_context=recent_context,
-                    style_profile=reference_style_profile,
-                    style_anchor=style_anchor or _reference_anchor_prompt_text(
-                        _aligned_reference_chapter_context(
-                            ws, volume, ch_num - volume_first_chapter + 1, volume_chapter_count,
-                        )
-                    ),
-                )
-            except LLMCallCancelled:
-                if stop_event is not None and stop_event.is_set():
-                    return None
-                if progress_callback:
-                    progress_callback("paused", completed, total, f"第{ch_num}章精修已暂停；继续后重新精修本章")
-                if pause_event is not None:
-                    pause_event.wait()
-                if cancel_event is not None:
-                    cancel_event.clear()
     out_dir = os.path.join(ws.file_system, "chapters", f"vol_{volume:02d}")
     os.makedirs(out_dir, exist_ok=True)
 
@@ -5986,6 +5986,15 @@ def gen_serial_chapters(
     finalized = _finalized_chapter_numbers(ws, "drafts", volume)
     range_end = min(total_chapters, end_chapter or total_chapters)
     effective_start = start_chapter
+    if not generation_id:
+        import uuid
+        if resume_checkpoint:
+            for number in range(start_chapter, range_end + 1):
+                saved = load_checkpoint(ws, volume, number)
+                if saved and saved.get("stage") != "published" and saved.get("generation_id"):
+                    generation_id = saved["generation_id"]
+                    break
+        generation_id = generation_id or uuid.uuid4().hex
     if regenerate_existing or humanize_existing:
         effective_start = max(
             effective_start,
@@ -5995,11 +6004,19 @@ def gen_serial_chapters(
         )
     for ch_num in range(effective_start, range_end + 1):
         out_file = os.path.join(out_dir, f"{ch_num:03d}_第{ch_num}章.md")
+        checkpoint = load_checkpoint(ws, volume, ch_num) if resume_checkpoint else {}
+        if checkpoint.get("generation_id") != generation_id:
+            checkpoint = {}
+        if checkpoint.get("stage") == "published" and os.path.exists(out_file):
+            if checkpoint.get("output_sha256") == digest(_read_file(out_file) or ""):
+                continue
         if os.path.exists(out_file):
             if ch_num in finalized:
                 print(f"  第{ch_num}章正文已标记为最终版，跳过。")
                 continue
-            if humanize and humanize_existing:
+            if resume_checkpoint and checkpoint and checkpoint.get("stage") != "published":
+                tasks.append(("humanize_existing" if humanize_existing else "generate", ch_num))
+            elif humanize and humanize_existing:
                 tasks.append(("humanize_existing", ch_num))
             elif regenerate_existing:
                 tasks.append(("generate", ch_num))
@@ -6053,264 +6070,26 @@ def gen_serial_chapters(
         else:
             print(f"\n--- 去AI味第{ch_num}章（{idx + 1}/{len(tasks)}）---")
 
-        if task_mode == "humanize_existing":
-            existing_text = _read_file(out_file)
-            if not existing_text:
-                print(f"  警告：第{ch_num}章正文为空，跳过。")
-                continue
-            existing_outline = _read_file(os.path.join(outlines_dir, f"chapter_{ch_num:03d}.md"))
-            existing_arc = _find_story_arc_for_chapter(ws, volume, ch_num)
-            style_query = f"{existing_arc}\n{existing_outline}\n{existing_text[:2500]}"
-            style_anchor = _human_style_anchor_for_query(
-                ws,
-                style_query,
-                _aligned_reference_chapter_context(
-                    ws, volume, ch_num - volume_first_chapter + 1, volume_chapter_count,
-                ),
-            )
-            existing_history = "\n\n".join(
-                _read_file(os.path.join(out_dir, f"{previous:03d}_第{previous}章.md")) or ""
-                for previous in range(max(1, ch_num - 2), ch_num)
-            )
-            result = humanize_with_controls(
-                ch_num, existing_text, idx, len(tasks), style_anchor=style_anchor,
-                chapter_outline=existing_outline, story_arc=existing_arc,
-                recent_context=existing_history,
-            )
-            if result is None:
-                break
-            if not style_library.get("ready"):
-                result = _format_chapter_paragraphs(result)
-            if ch_num in _finalized_chapter_numbers(ws, "drafts", volume):
-                continue
-            _write_generated_chapter(out_file, result)
-            processed_chapters.append(ch_num)
-            if progress_callback:
-                progress_callback("generating", idx + 1, len(tasks), f"第{ch_num}章正文已精修并写入")
-            print(f"  -> 第{ch_num}章正文已去AI味并保存：{out_file}")
-            print(f"     原稿备份：{_raw_chapter_backup_path(ws, volume, ch_num)}")
-            continue
-
-        # 读取本章章纲
-        chapter_outline = _read_file(os.path.join(outlines_dir, f"chapter_{ch_num:03d}.md"))
-        if not chapter_outline:
-            print(f"  警告：第{ch_num}章章纲文件不存在，跳过。")
-            continue
-        chapter_outline = re.sub(r'\n?\[(?:FINISHED|CONTINUE)\]\s*$', '', chapter_outline).strip()
-
-        current_draft_section = ""
-        if regenerate_existing and refinement_mode == "revise":
-            current_draft = _read_file(out_file)
-            if current_draft:
-                current_draft_section = (
-                    "=== 当前章原正文（以此为基础定向调整）===\n"
-                    f"{current_draft.strip()}\n\n"
-                )
-
-        # 读取前2章正文（不截断）
-        prev_texts = []
-        for i in range(max(1, ch_num - 2), ch_num):
-            prev_file = os.path.join(out_dir, f"{i:03d}_第{i}章.md")
-            content = _read_file(prev_file)
-            if content:
-                prev_texts.append(content.strip())
-        history_section = "\n\n".join(prev_texts) if prev_texts else "（无前序正文，这是第一章）"
-
-        # 读取本章对应的新流程故事情节单元。
-        story_arc_summary = _find_story_arc_for_chapter(ws, volume, ch_num)
-
-        # 章初面板是上一章落定后的状态，本章面板是章纲规划的章末目标。
-        # 正文必须写出两者之间的变化过程，不能把本章面板当作开篇状态。
-        panel_section = ""
-        if system_panel_status(ws)["enabled"]:
-            previous_panel = _previous_system_panel(ws, volume, ch_num)
-            current_panel = _read_json_file(
-                _system_panel_chapter_path(ws, volume, ch_num)
-            )
-            if not current_panel:
-                raise RuntimeError(
-                    f"第{ch_num}章已启用系统面板，但缺少本章面板。"
-                    "请先重新生成或同步本章章纲与系统面板。"
-                )
-            panel_section = (
-                "=== 系统面板状态变化 ===\n"
-                "【章初状态（上一章结束后）】\n"
-                f"{json.dumps(previous_panel, ensure_ascii=False, indent=2)}\n\n"
-                "【章末目标（本章结束后）】\n"
-                f"{json.dumps(current_panel, ensure_ascii=False, indent=2)}\n\n"
-            )
-
-        knowledge_result = retrieve_world_knowledge(
-            ws,
-            f"{story_arc_summary}\n{chapter_outline}\n第{ch_num}章",
-            "正文生成",
-            volume=volume,
-            trace_key=f"chapter_{ch_num:03d}",
+        from training.chapter_pipeline import process_chapter
+        result = process_chapter(
+            sys.modules[__name__], ws, volume=volume, chapter=ch_num, task_mode=task_mode,
+            llm=llm, editor_llm=humanize_llm, humanize=humanize,
+            humanize_strength=humanize_strength, writing_rules=writing_rules,
+            writing_instruction=writing_instruction, regenerate_existing=regenerate_existing,
+            refinement_mode=refinement_mode, resume_checkpoint=resume_checkpoint,
+            generation_id=generation_id,
+            reference_profile=reference_style_profile, reference_text=reference_style_text,
+            style_library=style_library, volume_first_chapter=volume_first_chapter,
+            volume_chapter_count=volume_chapter_count, progress_callback=progress_callback,
+            pause_event=pause_event, stop_event=stop_event, cancel_event=cancel_event,
+            completed=idx, total=len(tasks),
         )
-        reference_anchor = _aligned_reference_chapter_context(
-            ws, volume, ch_num - volume_first_chapter + 1, volume_chapter_count,
-        )
-        # Planner, retrieval and Writer share cancellation and the same immutable library index.
-        scene_plan = None
-        while True:
-            try:
-                scene_plan = plan_chapter_scenes(
-                    llm, chapter_outline, story_arc=story_arc_summary,
-                    recent_context=history_section, instruction=writing_instruction, cancel_event=cancel_event,
-                )
-                scene_style_context, scene_trace = "", []
-                if style_library.get("ready"):
-                    style_index = _read_json_file(os.path.join(ws.reference, "style_library", "index.json")) or {}
-                    style_items = style_index.get("samples") or []
-                    profile_payload = load_human_style_profile(ws.reference, style_index)
-                    reference_anchor_text = format_human_style_context({
-                        "ready": True, "profile": profile_payload.get("profile") or {},
-                        "metrics": profile_payload.get("metrics") or {},
-                    }, include_samples=False)
-                    scene_style_context = build_scene_style_context(
-                        ws.reference, style_items, scene_plan, samples_per_scene=4, chars_per_scene=5000,
-                        max_total_chars=18000, trace=scene_trace, cancel_event=cancel_event,
-                    )
-                else:
-                    style_index = {}
-                    style_query = f"{chapter_outline}\n{writing_instruction}\n第{ch_num}章"
-                    reference_anchor_text = _human_style_anchor_for_query(ws, style_query, reference_anchor)
-                break
-            except LLMCallCancelled:
-                if stop_event is not None and stop_event.is_set():
-                    scene_plan = None
-                    break
-                if pause_event is None:
-                    raise
-                if progress_callback:
-                    progress_callback("paused", idx, len(tasks), f"第{ch_num}章场景规划/检索已暂停")
-                pause_event.wait()
-                if cancel_event is not None:
-                    cancel_event.clear()
-        if scene_plan is None:
-            break
-        scene_plan_text = json.dumps({"scenes": scene_plan}, ensure_ascii=False, indent=2)
-        context = (
-            f"=== 剧情与安全约束 ===\n{writing_rules}\n\n"
-            f"=== 语言风格优先级 ===\n"
-            f"Style Engine v2 的 Author Bible 与逐 Scene 人工原文案例是语言表达的最高风格依据。"
-            f"章纲决定发生什么；Scene Plan 决定这一场完成什么；人工案例只决定类似场景通常怎样处理叙述、节奏、信息和情绪。"
-            f"前序正文只负责连续性，不能成为文风权威。\n\n"
-            f"=== 人工参考小说全书风格指纹 / Author Bible 基线 ===\n{reference_style_text}\n\n"
-            + (f"{reference_anchor_text}\n\n" if reference_anchor_text else "")
-            + f"=== 当前章 Scene Plan ===\n{scene_plan_text}\n\n"
-            + (f"=== 逐 Scene 检索到的连续人工原文案例 ===\n{scene_style_context}\n\n" if scene_style_context else "")
-            + f"=== 目标世界事实约束（只用于校验，不要求逐条写出）===\n"
-            f"{knowledge_result['context'] or '（未启用目标世界知识库；以章纲和前文为准。）'}\n\n"
-            f"=== 当前故事情节单元 ===\n{story_arc_summary or '（未找到故事情节单元，请严格以章纲为准）'}\n\n"
-            f"=== 前序正文（仅用于承接，不得覆盖本章章纲）===\n{history_section}\n\n"
-            + panel_section
-            + current_draft_section
-            + f"=== 当前章章纲（第{ch_num}章，事件与事实依据；背景无需逐条写出）===\n{chapter_outline}\n\n"
-            + (f"=== 用户本轮调整要求 ===\n{writing_instruction}\n\n" if writing_instruction else "")
-            + "=== 最终执行提醒 ===\n"
-            + "只输出本章标题和正文；按 Scene Plan 顺序完成章纲既定事件，但不要把 Scene Plan 写成小标题或提纲；"
-              "每个 Scene 应吸收该 Scene 对应人工案例的处理机制，同时保持自然过渡和整章连贯；"
-              "不得照抄参考原句、人物、专名、事件或前序正文。"
-        )
-
-        prompt = PromptLoader.load(
-            "adaptive_drafting", context=context, start_chapter=ch_num, end_chapter=ch_num, chapter_count=1,
-        )
-        if len(prompt) > 60000:
-            raise ValueError(f"第{ch_num}章输入共{len(prompt)}字符，超过60000字符保护上限；未截断章纲、前文或设定，请检查异常大的输入。")
-        trace_path = os.path.join(ws.file_system, "drafts", f"vol_{volume:02d}", "style_traces",
-                                  f"chapter_{ch_num:03d}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json")
-        _write_generated_chapter(trace_path, json.dumps({
-            "chapter": ch_num, "planner_sources": list(dict.fromkeys(s.get("planner_source") for s in scene_plan)),
-            "scene_plan": scene_plan, "retrieval": scene_trace,
-            "library_revision": style_index.get("pipeline_revision"),
-            "library_source_digest": style_index.get("source_digest"),
-            "prompt_chars": len(prompt), "style_context_chars": len(scene_style_context),
-            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-        }, ensure_ascii=False, indent=2))
-        print(f"  -> 场景规划 {len(scene_plan)} 场；样本上下文 {len(scene_style_context)} 字；完整输入 {len(prompt)} 字。")
-        print(f"     本章规划/检索记录：{trace_path}")
-        while True:
-            try:
-                result = normalize_text(_generate_with_cancel(llm, prompt, cancel_event))
-                break
-            except LLMCallCancelled:
-                if stop_event is not None and stop_event.is_set():
-                    result = None
-                    break
-                if progress_callback:
-                    progress_callback("paused", idx, len(tasks), f"第{ch_num}章生成已暂停；继续后重新生成本章")
-                if pause_event is not None:
-                    pause_event.wait()
-                if cancel_event is not None:
-                    cancel_event.clear()
         if result is None:
             break
-        if not result.strip():
-            raise RuntimeError(f"第{ch_num}章模型返回空正文，未覆盖已有文件。")
-        _backup_raw_chapter(ws, volume, ch_num, result)
-        if humanize:
-            print(f"  第{ch_num}章正文编辑审读与局部精修中（使用同一批场景案例）...")
-            result = humanize_with_controls(
-                ch_num, result, idx, len(tasks), style_anchor=reference_anchor_text + "\n\n" + scene_style_context,
-                chapter_outline=chapter_outline, story_arc=story_arc_summary,
-                recent_context=history_section,
-            )
-            if result is None:
-                break
-        while True:
-            try:
-                audit = _audit_generated_chapter_knowledge(
-                    llm, ch_num, result, chapter_outline, knowledge_result,
-                    cancel_event=cancel_event,
-                )
-                break
-            except LLMCallCancelled:
-                if stop_event is not None and stop_event.is_set():
-                    result = None
-                    break
-                if progress_callback:
-                    progress_callback(
-                        "paused", idx, len(tasks),
-                        f"第{ch_num}章设定一致性审查已暂停；继续后重新审查",
-                    )
-                if pause_event is not None:
-                    pause_event.wait()
-                if cancel_event is not None:
-                    cancel_event.clear()
-        if result is None:
-            break
-        if audit.get("rewrite"):
-            print(f"  -> 第{ch_num}章命中知识库事实冲突，正在局部修正。")
-            result, applied = _repair_chapter_knowledge(result, audit)
-            audit["applied_corrections"] = applied
-            audit["rewrite"] = bool(applied)
-        record_consistency_audit(knowledge_result.get("snapshot_path"), audit)
-        if not style_library.get("ready"):
-            result = _format_chapter_paragraphs(result)
-        if stop_event is not None and stop_event.is_set():
-            break
-        if ch_num in _finalized_chapter_numbers(ws, "drafts", volume):
-            print(f"  -> 第{ch_num}章已在生成期间确认最终版，不覆盖。")
-            continue
-        if regenerate_existing and os.path.exists(out_file):
-            import shutil
-            backup_dir = os.path.join(out_dir, "versions")
-            os.makedirs(backup_dir, exist_ok=True)
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_path = os.path.join(backup_dir, f"{os.path.basename(out_file)}_{stamp}")
-            if not os.path.exists(backup_path):
-                shutil.copy2(out_file, backup_path)
-        _write_generated_chapter(out_file, result)
         processed_chapters.append(ch_num)
         if progress_callback:
-            progress_callback("generating", idx + 1, len(tasks), f"第{ch_num}章正文已写入")
-        if humanize:
-            print(f"  -> 第{ch_num}章正文已保存：{out_file}")
-            print(f"     原稿备份：{_raw_chapter_backup_path(ws, volume, ch_num)}")
-        else:
-            print(f"  -> 第{ch_num}章正文已保存：{out_file}")
+            progress_callback("generating", idx + 1, len(tasks), f"第{ch_num}章正文已通过验收并写入")
+        print(f"  -> 第{ch_num}章正文已保存：{out_file}")
 
     completed = 0
     artifacts = []
@@ -6349,9 +6128,12 @@ def chapter_draft_resume_status(ws, volume, arc_idx):
     chapters = list(range(arc["start_ch"], arc["end_ch"] + 1))
     existing = [ch for ch in chapters if _read_file(os.path.join(out_dir, f"{ch:03d}_第{ch}章.md"))]
     missing = [ch for ch in chapters if ch not in existing]
+    pending = [ch for ch in chapters if (load_checkpoint(ws, volume, ch).get("stage") or "published") != "published"]
+    remaining = sorted(set(missing + pending))
     return {
-        "can_resume": bool(existing and missing), "completed": len(existing), "total": len(chapters),
-        "next_chapter": missing[0] if missing else None,
+        "can_resume": bool(remaining and (existing or pending)),
+        "completed": len([ch for ch in existing if ch not in pending]), "total": len(chapters),
+        "next_chapter": remaining[0] if remaining else None, "pending_chapters": pending,
     }
 
 

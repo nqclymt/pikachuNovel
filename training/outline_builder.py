@@ -8,7 +8,7 @@ import hashlib
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from core.llm_provider import LLMProvider
+from core.llm_provider import LLMProvider, provider_configured
 from core.prompt_loader import PromptLoader
 from core.config import ConfigLoader
 from core.text_utils import normalize_text
@@ -900,9 +900,7 @@ def _run_legacy_outline_build(txt_path=None, output_dir=None, batch_size=20, ski
 
     # 4. 初始化 LLM
     builder_config = ConfigLoader.get_data_builder_config()
-    if not builder_config.get("api_key"):
-        builder_config["api_key"] = os.getenv("OPENAI_API_KEY")
-    if not builder_config.get("api_key"):
+    if not provider_configured(builder_config):
         print("错误：未检测到 API Key。")
         return
     llm = LLMProvider(**builder_config)
@@ -1109,9 +1107,7 @@ def resegment(outlines_dir, llm=None):
 
     if llm is None:
         builder_config = ConfigLoader.get_data_builder_config()
-        if not builder_config.get("api_key"):
-            builder_config["api_key"] = os.getenv("OPENAI_API_KEY")
-        if not builder_config.get("api_key"):
+        if not provider_configured(builder_config):
             print("错误：未检测到 API Key。")
             return False
         llm = LLMProvider(**builder_config)

@@ -5,7 +5,7 @@ import json
 import math
 import re
 
-from core.llm_provider import LLMCallCancelled
+from core.llm_provider import LLMCallCancelled, LLMExecutionBlocked
 from core.prompt_loader import PromptLoader
 from core.text_utils import normalize_text, parse_json_response
 
@@ -103,7 +103,7 @@ def edit_chapter_prose(
             return None
         try:
             return _call_json(llm, prompt, cancel_event)
-        except LLMCallCancelled:
+        except (LLMCallCancelled, LLMExecutionBlocked):
             raise
         except Exception as exc:
             # Do not persist provider exception bodies, which can contain credentials.

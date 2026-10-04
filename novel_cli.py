@@ -475,7 +475,7 @@ def cmd_reference_resume(args):
 def cmd_reference_style(args):
     """只建立/重建人工文笔库，不重复执行剧情结构拆解。"""
     from core.config import ConfigLoader
-    from core.llm_provider import LLMProvider
+    from core.llm_provider import LLMProvider, provider_configured
     from core.workspace import init_workspace
     from training.human_style_library import build_human_style_library
 
@@ -487,9 +487,7 @@ def cmd_reference_style(args):
         print("错误：--max-chapters 必须是正整数。")
         return
     config = ConfigLoader.get_data_builder_config()
-    if not config.get("api_key"):
-        config["api_key"] = os.getenv("OPENAI_API_KEY")
-    if not config.get("api_key"):
+    if not provider_configured(config):
         print("错误：未检测到参考拆解模型 API Key，无法提炼人工文笔画像。")
         return
     status = build_human_style_library(

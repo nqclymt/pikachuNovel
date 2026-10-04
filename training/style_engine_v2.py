@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from core.prompt_loader import PromptLoader
-from core.llm_provider import LLMCallCancelled
+from core.llm_provider import LLMCallCancelled, LLMExecutionBlocked
 from core.text_encoding import read_text_file
 from core.text_utils import parse_json_response
 
@@ -346,12 +346,36 @@ def score_style_example(item: dict[str, Any], query: dict[str, Any]) -> tuple[fl
     return score, reasons
 
 
-def retrieve_diverse_style_examples(reference_dir: str | Path, items: list[dict[str, Any]], query: Any, *, max_samples: int = 4, max_chars: int = 7600, exclude_ids=None, cancel_event=None) -> list[dict[str, Any]]:
+def _relevance_reasons(item: dict[str, Any], query: dict[str, Any], lexical: float) -> list[str]:
+    """Require a scene-purpose match; common defaults and confidence are not evidence."""
+    reasons = []
+    scene_type = query.get("scene_type")
+    # "daily" is also the heuristic's no-signal default. It needs lexical or other
+    # informative support so an unclassified scene does not match every quiet passage.
+    if scene_type in _SCENE_TYPE_WORDS and scene_type != "daily" and item.get("scene_type") == scene_type:
+        reasons.append(f"relevance:scene_type={scene_type}")
+    informative = [key for key, default in (("emotion", "neutral"),
+                   ("plot_function", "development"), ("information_function", "implicit_progress"))
+                   if query.get(key) and query.get(key) != default and item.get(key) == query.get(key)]
+    if len(informative) >= 2:
+        reasons.append("relevance:purpose=" + "+".join(informative))
+    # An independent lexical route keeps examples usable when their labels are weak.
+    # The threshold is deliberately low; the gate only rejects unsupported matches.
+    if lexical >= 0.08:
+        reasons.append(f"relevance:lexical={lexical:.2f}")
+    return reasons
+
+
+def retrieve_diverse_style_examples(reference_dir: str | Path, items: list[dict[str, Any]], query: Any, *, max_samples: int = 4, max_chars: int = 7600, exclude_ids=None, cancel_event=None, diagnostics: dict | None = None) -> list[dict[str, Any]]:
     reference_dir = Path(reference_dir)
     max_samples, max_chars = max(0, min(8, int(max_samples))), max(0, int(max_chars))
-    if not max_samples or not max_chars:
-        return []
     _check_cancel(cancel_event)
+    if diagnostics is not None:
+        diagnostics.update(status="no_candidates", considered=0, relevant=0, selected=0)
+    if not max_samples or not max_chars:
+        if diagnostics is not None:
+            diagnostics["status"] = "budget_exhausted"
+        return []
     excluded = set(exclude_ids or [])
     normalized = normalize_scene_query(query)
     # Stage 1: structured metadata narrows thousands of examples cheaply. Stage 2 then pays
@@ -379,13 +403,22 @@ def retrieve_diverse_style_examples(reference_dir: str | Path, items: list[dict[
     ranked = []
     query_text = str(normalized.get("text") or "")
     for meta_score, item, reasons in shortlist:
+        _check_cancel(cancel_event)
         lexical = _lexical_similarity(query_text, str(item.get("semantic_text") or ""))
+        relevance = _relevance_reasons(item, normalized, lexical)
+        if not relevance:
+            continue
         full_score = meta_score + lexical * 12.0
-        full_reasons = [*reasons]
+        full_reasons = [*reasons, *relevance]
         if lexical:
             full_reasons.append(f"lexical={lexical:.2f}")
         ranked.append((full_score, item, full_reasons))
     ranked.sort(key=lambda row: (-row[0], int(row[1].get("chapter") or 0), int(row[1].get("scene") or 0)))
+    if diagnostics is not None:
+        diagnostics.update(considered=len(shortlist), relevant=len(ranked),
+                           status="no_relevant_examples" if shortlist and not ranked else "no_candidates")
+    if not ranked:
+        return []
 
     # Load a bounded candidate pool, then recompute marginal relevance after EACH selection.
     candidates = []
@@ -404,6 +437,8 @@ def retrieve_diverse_style_examples(reference_dir: str | Path, items: list[dict[
             continue
         seen_texts.add(digest)
         candidates.append((base_score, item, reasons, text, _tokens(text[:1800])))
+    if diagnostics is not None:
+        diagnostics["status"] = "budget_exhausted" if candidates else "no_readable_examples"
     selected: list[dict[str, Any]] = []
     selected_tokens = []
     used_chars = 0
@@ -434,6 +469,10 @@ def retrieve_diverse_style_examples(reference_dir: str | Path, items: list[dict[
         selected.append(payload)
         selected_tokens.append(tokens)
         used_chars += len(clipped)
+    if diagnostics is not None:
+        diagnostics.update(selected=len(selected))
+        if selected:
+            diagnostics["status"] = "matched"
     return selected
 
 
@@ -591,7 +630,7 @@ def plan_chapter_scenes(llm: Any, chapter_outline: str, story_arc: str = "", rec
             })
         print(f"  -> 场景规划：模型成功返回 {len(normalized)} 个场景。")
         return normalized
-    except LLMCallCancelled:
+    except (LLMCallCancelled, LLMExecutionBlocked):
         raise
     except Exception as exc:
         # Preserve basic generation, but expose degradation in both logs and saved scene plans.
@@ -620,9 +659,10 @@ def build_scene_style_context(reference_dir: str | Path, index_items: list[dict[
         # Goals/facts are already present in Scene Plan. Do not duplicate or truncate them here.
         heading = f"### 目标 Scene {scene.get('scene')} 的写法案例\n"
         allowance = max(0, quota - len(heading))
+        diagnostics = {}
         examples = retrieve_diverse_style_examples(
             reference_dir, index_items, query, max_samples=samples_per_scene,
-            max_chars=allowance, exclude_ids=used_ids, cancel_event=cancel_event,
+            max_chars=allowance, exclude_ids=used_ids, cancel_event=cancel_event, diagnostics=diagnostics,
         )
         rendered, records = [], []
         for example in examples:
@@ -636,12 +676,22 @@ def build_scene_style_context(reference_dir: str | Path, index_items: list[dict[
             used_ids.add(str(example.get("id") or ""))
             records.append({"id": example.get("id"), "chapter": example.get("chapter"), "scene": example.get("scene"),
                             "chars": len(text), "score": example.get("selection_score"), "reasons": example.get("match_reasons")})
+        if examples and not records:
+            diagnostics.update(status="budget_exhausted", selected=0)
         body = "\n\n".join(rendered) or "（没有合适且符合预算的案例；以章纲和作者画像为准。）"
         block = heading + body
         if len(block) <= quota:
             blocks.append(block)
         if trace is not None:
-            trace.append({"scene": scene.get("scene"), "query": query, "examples": records, "budget": quota})
+            reason = {
+                "matched": "已有场景类型、用途或词面匹配的案例。",
+                "no_relevant_examples": "候选案例未达到最低匹配门槛；仅使用章纲和作者画像。",
+                "no_candidates": "没有可用的未重复候选；仅使用章纲和作者画像。",
+                "no_readable_examples": "匹配案例文件不可读或为空；仅使用章纲和作者画像。",
+                "budget_exhausted": "剩余预算不足以保留完整案例片段；仅使用章纲和作者画像。",
+            }[diagnostics["status"]]
+            trace.append({"scene": scene.get("scene"), "query": query, "examples": records,
+                          "budget": quota, "retrieval": diagnostics, "reason": reason})
     result = "\n\n".join(blocks)
     assert len(result) <= max_total_chars
     return result

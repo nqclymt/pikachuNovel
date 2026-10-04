@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from core.config import ConfigLoader
-from core.llm_provider import LLMProvider
+from core.llm_provider import BACKEND_ANTIGRAVITY, LLMProvider, normalize_backend, provider_configured
 from core.prompt_loader import PromptLoader
 from core.text_encoding import read_text_file
 from core.text_utils import normalize_text, parse_json_response
@@ -904,16 +904,14 @@ def run_reference_analysis(
 ) -> dict[str, Any]:
     """CLI 入口：使用参考拆解模型运行新的四阶段分析。"""
     config = ConfigLoader.get_data_builder_config()
-    if not config.get("api_key"):
-        config["api_key"] = os.getenv("OPENAI_API_KEY")
-    if not config.get("api_key"):
+    if not provider_configured(config):
         raise RuntimeError("未检测到参考拆解模型 API Key。")
     analyzer = ReferenceAnalyzer(
         txt_path,
         output_dir,
         max_chapters=max_chapters,
         card_batch_size=batch_size,
-        max_workers=min(8, max(2, batch_size)),
+        max_workers=1 if normalize_backend(config.get("backend")) == BACKEND_ANTIGRAVITY else min(8, max(2, batch_size)),
         segment_load_size=min(8, max(4, batch_size // 2)),
         max_chapters_per_segment=12,
         llm=LLMProvider(**config),
