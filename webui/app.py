@@ -418,6 +418,16 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
 
         return resume_scheduler()
 
+    @app.post("/api/config/antigravity/launch")
+    def antigravity_launch(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        from core.antigravity import launch_antigravity
+
+        try:
+            cli_path = _config_value("TEST_CLI_PATH", payload.get("cli_path") or "")
+            return launch_antigravity(cli_path=cli_path)
+        except Exception as exc:
+            raise _http_error(exc) from exc
+
     @app.post("/api/config/antigravity/test")
     def antigravity_test(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
         # Sync routes run in FastAPI's worker pool. A total deadline also covers
@@ -444,7 +454,7 @@ def create_app(workspace_root: str | None = None) -> FastAPI:
                     cancel_event=cancelled, max_retries=0, max_tokens=32,
                 )
                 if not response.strip():
-                    raise RuntimeError("Antigravity 未返回内容，请在终端运行 agy 检查登录和模型配置。")
+                    raise RuntimeError("Antigravity 未返回内容，请在设置中启动 agy 检查登录和模型配置。")
             finally:
                 deadline.cancel()
             return {"ok": True, "response": response.strip()[:500], "scheduler": scheduler_status()}

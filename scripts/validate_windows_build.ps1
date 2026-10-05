@@ -49,6 +49,9 @@ try {
     if (-not $Asset.Content.Contains("human_style_pipeline_revision")) {
         throw "The frozen desktop served stale wizard assets without the style-pipeline status."
     }
+    if (-not $Asset.Content.Contains("data-antigravity-launch")) {
+        throw "The frozen desktop is missing the interactive Antigravity login launcher."
+    }
     $Presets = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/assets/workflow-presets.js" -TimeoutSec 5
     if (-not $Index.Content.Contains("/assets/workflow-presets.js") -or -not $Presets.Content.Contains("WorkflowPromptPresets")) {
         throw "The frozen desktop is missing the workflow preset module."

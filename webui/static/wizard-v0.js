@@ -134,8 +134,8 @@ function modelConfigFields(groupId, group) {
       <label>思考强度<select name="${prefix}_CLI_EFFORT">
         ${[["low", "低"], ["medium", "中"], ["high", "高"]].map(([value, label]) => `<option value="${value}" ${(group.cli_effort || "medium") === value ? "selected" : ""}>${label}</option>`).join("")}
       </select></label>
-      <p class="model-config-hint">切换后请确认模型名称，清空可使用 agy 默认模型。自定义 Agent 须禁用工具（tools: []）。检测与测试使用当前填写值；测试成功后请保存配置。</p>
-      <div class="antigravity-actions"><button type="button" class="secondary-button" data-antigravity-probe>检测安装</button><button type="button" class="secondary-button" data-antigravity-test>测试连接（使用额度）</button></div>
+      <p class="model-config-hint">切换后请确认模型名称，清空可使用 agy 默认模型。自定义 Agent 须禁用工具（tools: []）。首次使用或登录失效时，可直接从这里打开 agy；应用会自动沿用系统代理。</p>
+      <div class="antigravity-actions"><button type="button" class="secondary-button" data-antigravity-probe>检测安装</button><button type="button" class="secondary-button" data-antigravity-launch>启动/登录 agy</button><button type="button" class="secondary-button" data-antigravity-test>测试连接（使用额度）</button></div>
       <p class="antigravity-result" data-antigravity-result role="status" aria-live="polite"></p>
     </div>
   </section>`;
@@ -144,7 +144,7 @@ function modelConfigFields(groupId, group) {
 function antigravityPanelMarkup() {
   return `<section class="antigravity-panel">
     <h3>Antigravity 调度</h3>
-    <p class="model-config-hint">请先安装官方 agy，在本机终端运行 agy 并用 Google 账号登录。各阶段共用串行队列；登录失效或达到额度限制时暂停后续调用，修复后可恢复调度。</p>
+    <p class="model-config-hint">请先安装官方 agy，再在下方任一 Antigravity 配置组点击“启动/登录 agy”并用 Google 账号登录。各阶段共用串行队列；登录失效或达到额度限制时暂停后续调用，修复后可恢复调度。</p>
     <p class="model-config-hint">恢复调度后，请回到任务或章节界面继续已中断的写作。登录和订阅额度由 agy 管理。</p>
     <p id="antigravity-scheduler-status" class="antigravity-result" role="status" aria-live="polite">正在读取调度状态…</p>
     <div class="antigravity-actions"><button type="button" class="secondary-button" id="refresh-antigravity-scheduler">刷新状态</button><button type="button" class="secondary-button" id="resume-antigravity-scheduler" disabled>恢复调度</button></div>
@@ -187,7 +187,7 @@ async function checkAntigravity(event, testConnection = false) {
   const button = event.currentTarget;
   const section = button.closest("[data-model-group]");
   const result = section.querySelector("[data-antigravity-result]");
-  const buttons = [...section.querySelectorAll("[data-antigravity-probe], [data-antigravity-test]")];
+  const buttons = [...section.querySelectorAll("[data-antigravity-probe], [data-antigravity-launch], [data-antigravity-test]")];
   buttons.forEach((item) => { item.disabled = true; });
   result.classList.remove("error");
   result.textContent = testConnection ? "正在使用当前表单配置发起一次短请求，最多等待约 65 秒…" : "正在检测本机 agy，不调用模型…";
@@ -217,6 +217,31 @@ async function checkAntigravity(event, testConnection = false) {
   }
 }
 
+async function launchAntigravity(event) {
+  const button = event.currentTarget;
+  const section = button.closest("[data-model-group]");
+  const result = section.querySelector("[data-antigravity-result]");
+  const buttons = [...section.querySelectorAll("[data-antigravity-probe], [data-antigravity-launch], [data-antigravity-test]")];
+  buttons.forEach((item) => { item.disabled = true; });
+  result.classList.remove("error");
+  result.textContent = "正在打开 agy 登录窗口…";
+  try {
+    const values = antigravityFormValues(section);
+    const data = await api("/api/config/antigravity/launch", {
+      method: "POST",
+      body: JSON.stringify({ cli_path: values.cli_path }),
+    });
+    const proxy = data.proxy === "system" ? "，已自动使用系统代理" : data.proxy ? "，已沿用代理环境" : "";
+    result.textContent = `已打开 agy${proxy}。请在新窗口完成初始化和 Google 登录，完成后回到这里测试连接。`;
+    showToast("agy 登录窗口已打开。完成登录后请测试连接。");
+  } catch (error) {
+    result.textContent = error.message || "无法打开 agy 登录窗口。";
+    result.classList.add("error");
+  } finally {
+    buttons.forEach((item) => { item.disabled = false; });
+  }
+}
+
 function bindModelBackendActions() {
   $$('[data-model-backend]').forEach((select) => select.addEventListener("change", () => {
     const section = select.closest("[data-model-group]");
@@ -231,6 +256,7 @@ function bindModelBackendActions() {
     section.querySelector(`[name="${prefix}_MODEL"]`).placeholder = cli ? "留空使用 agy 默认模型；终端 agy models 查看名称" : "例如：deepseek-v4-pro";
   }));
   $$('[data-antigravity-probe]').forEach((button) => button.addEventListener("click", (event) => checkAntigravity(event)));
+  $$('[data-antigravity-launch]').forEach((button) => button.addEventListener("click", launchAntigravity));
   $$('[data-antigravity-test]').forEach((button) => button.addEventListener("click", (event) => checkAntigravity(event, true)));
   $("#refresh-antigravity-scheduler")?.addEventListener("click", refreshAntigravityScheduler);
   $("#resume-antigravity-scheduler")?.addEventListener("click", async (event) => {

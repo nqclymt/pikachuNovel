@@ -9,12 +9,15 @@ import math
 import os
 import queue
 import re
+import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 from core.llm_provider import LLMExecutionBlocked
@@ -44,11 +47,11 @@ plugins: []
 """
 _ERROR_MESSAGES = {
     "missing": "未找到官方 agy CLI。请安装 Antigravity CLI，或在设置中填写可执行文件路径。",
-    "auth": "Antigravity 登录已失效或尚未登录。请在终端运行 agy 完成 Google 登录，再点击恢复调度。",
+    "auth": "Antigravity 登录已失效或尚未登录。请在设置中点击“启动/登录 agy”完成 Google 登录，再点击恢复调度。",
     "quota": "Antigravity 额度或调用频率已受限。已暂停后续请求，请等待额度恢复后点击恢复调度。",
     "timeout": "Antigravity 请求超时，已终止本次调用；未接收不完整正文。",
     "protocol": "Antigravity 返回了不兼容或不完整的结果；请更新官方 CLI 后重试。",
-    "process": "Antigravity 调用失败。请在终端检查 agy 的模型、Agent 和网络配置后重试。",
+    "process": "Antigravity 调用失败。请在设置中启动 agy，检查模型、Agent 和网络配置后重试。",
 }
 
 
@@ -92,6 +95,107 @@ def _process_options():
     if os.name == "nt":
         return {"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
     return {"start_new_session": True}
+
+
+def _system_proxy():
+    """Return the OS HTTPS/HTTP proxy without reading browser credentials."""
+    try:
+        if os.name == "nt" and hasattr(urllib.request, "getproxies_registry"):
+            proxies = urllib.request.getproxies_registry()
+        else:
+            proxies = urllib.request.getproxies()
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(proxies, dict):
+        return ""
+    return str(proxies.get("https") or proxies.get("http") or proxies.get("all") or "").strip()
+
+
+def _agy_environment():
+    """Build an account-login environment and bridge the desktop system proxy."""
+    env = os.environ.copy()
+    # This backend intentionally uses the CLI's signed-in Google account.
+    for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_BASE_URL"):
+        env.pop(key, None)
+
+    explicit = str(env.get("ANTIGRAVITY_PROXY") or "").strip()
+    inherited = next((str(env.get(key) or "").strip() for key in (
+        "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"
+    ) if str(env.get(key) or "").strip()), "")
+    proxy = explicit or inherited
+    source = "configured" if proxy else ""
+    if not proxy:
+        proxy = _system_proxy()
+        source = "system" if proxy else ""
+    if proxy and "://" not in proxy:
+        proxy = f"http://{proxy}"
+    if proxy and ("\r" in proxy or "\n" in proxy or "\x00" in proxy):
+        proxy = ""
+        source = ""
+    if proxy and (explicit or not inherited):
+        # Go's HTTP transport honors these variables. Set both cases because
+        # third-party launchers around agy are not guaranteed to use Go's casing.
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            env[key] = proxy
+    return env, source
+
+
+def _apple_script_string(value):
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def launch_antigravity(cli_path=""):
+    """Open the interactive official CLI in a visible terminal for login/setup."""
+    path = _resolve_cli(cli_path)
+    env, proxy_source = _agy_environment()
+    try:
+        if os.name == "nt":
+            proc = subprocess.Popen(
+                [path], cwd=str(Path.home()), env=env, close_fds=True,
+                creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP,
+            )
+        elif sys.platform == "darwin":
+            assignments = " ".join(
+                f"{key}={shlex.quote(env[key])}"
+                for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY") if env.get(key)
+            )
+            command = "unset GEMINI_API_KEY GOOGLE_API_KEY GOOGLE_GEMINI_BASE_URL; "
+            command += f"env {assignments} {shlex.quote(path)}" if assignments else shlex.quote(path)
+            script = (
+                'tell application "Terminal"\n'
+                "activate\n"
+                f"do script {_apple_script_string(command)}\n"
+                "end tell"
+            )
+            proc = subprocess.Popen(
+                ["/usr/bin/osascript", "-e", script],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True, close_fds=True,
+            )
+        else:
+            terminals = (
+                ("x-terminal-emulator", ["-e", path]),
+                ("gnome-terminal", ["--", path]),
+                ("konsole", ["-e", path]),
+                ("xterm", ["-e", path]),
+            )
+            selected = next(((binary, args) for binary, args in terminals if shutil.which(binary)), None)
+            if not selected:
+                raise AntigravityError("process", "未找到可用的图形终端，请在系统终端中运行 agy。")
+            proc = subprocess.Popen(
+                selected[1], cwd=str(Path.home()), env=env,
+                start_new_session=True, close_fds=True,
+            )
+    except AntigravityError:
+        raise
+    except OSError as error:
+        raise AntigravityError("process", "无法打开 agy 登录窗口，请检查终端和执行权限。") from error
+    return {
+        "opened": True,
+        "path": path,
+        "pid": int(proc.pid),
+        "proxy": proxy_source,
+    }
 
 
 class _ProcessJob:
@@ -216,10 +320,7 @@ def _failure_category(text):
 
 
 def _run_process(argv, prompt, cwd, timeout, is_json, cancel_event, status_callback):
-    env = os.environ.copy()
-    # This backend intentionally uses the CLI's signed-in Google account.
-    for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_BASE_URL"):
-        env.pop(key, None)
+    env, _ = _agy_environment()
     try:
         proc = subprocess.Popen(argv, cwd=str(cwd), env=env, stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, **_process_options())

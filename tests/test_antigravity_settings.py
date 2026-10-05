@@ -124,6 +124,26 @@ class AntigravitySettingsTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         resume.assert_called_once_with()
 
+    def test_launch_opens_interactive_cli_with_unsaved_path(self):
+        launched = {
+            "opened": True, "path": "C:/Apps/agy.exe", "pid": 42, "proxy": "system",
+        }
+        with patch("core.antigravity.launch_antigravity", return_value=launched) as launch:
+            response = self.client.post("/api/config/antigravity/launch", json={
+                "cli_path": " C:/Apps/agy.exe ",
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), launched)
+        launch.assert_called_once_with(cli_path="C:/Apps/agy.exe")
+
+    def test_launch_rejects_multiline_cli_path(self):
+        with patch("core.antigravity.launch_antigravity") as launch:
+            response = self.client.post("/api/config/antigravity/launch", json={
+                "cli_path": "agy.exe\ncalc.exe",
+            })
+        self.assertEqual(response.status_code, 400)
+        launch.assert_not_called()
+
     def test_cli_failure_is_shown_as_actionable_client_error(self):
         provider = MagicMock()
         provider.generate_cancelable.side_effect = RuntimeError("请在终端运行 agy 完成 Google 登录")

@@ -25,6 +25,7 @@ test("CLI settings show Google login and hide API fields without discarding them
   assert.match(html, /https:\/\/saved-api.example\/v1/);
   assert.match(html, /已配置，留空保持不变/);
   assert.match(html, /Google 登录 · 待测试/);
+  assert.match(html, /启动\/登录 agy/);
   assert.match(html, /测试连接（使用额度）/);
   assert.match(html, /tools: \[\]/);
 });
@@ -47,9 +48,46 @@ test("scheduler distinguishes queue, running, paused and ready states", () => {
   assert.match(context.antigravitySchedulerText({ running: true, waiting: 3 }), /执行 1 个请求，排队 3/);
   assert.match(context.antigravitySchedulerText({ paused: true, message: "额度受限" }), /暂停：额度受限/);
   const panel = context.antigravityPanelMarkup();
-  assert.match(panel, /本机终端运行 agy/);
+  assert.match(panel, /启动\/登录 agy/);
   assert.match(panel, /继续已中断的写作/);
   assert.match(panel, /id="resume-antigravity-scheduler" disabled/);
+});
+
+test("launch button opens interactive agy with the current unsaved path", async () => {
+  const context = wizard();
+  const classes = new Set();
+  const result = { textContent: "", classList: { add: (key) => classes.add(key), remove: (key) => classes.delete(key) } };
+  const button = { disabled: false };
+  const fields = {
+    DATA_BUILDER_MODEL: "",
+    DATA_BUILDER_CLI_PATH: " C:/Unstored/agy.exe ",
+    DATA_BUILDER_CLI_AGENT: "",
+    DATA_BUILDER_CLI_EFFORT: "medium",
+  };
+  const section = {
+    dataset: { modelGroup: "data_builder" },
+    querySelector: (selector) => selector === "[data-antigravity-result]"
+      ? result
+      : { value: fields[selector.match(/name="([^"]+)"/)[1]] },
+    querySelectorAll: () => [button],
+  };
+  button.closest = () => section;
+  let request;
+  context.api = async (path, options) => {
+    request = { path, body: JSON.parse(options.body) };
+    return { opened: true, proxy: "system" };
+  };
+  context.showToast = () => {};
+
+  await context.launchAntigravity({ currentTarget: button });
+
+  assert.deepEqual(request, {
+    path: "/api/config/antigravity/launch",
+    body: { cli_path: "C:/Unstored/agy.exe" },
+  });
+  assert.match(result.textContent, /系统代理/);
+  assert.equal(button.disabled, false);
+  assert.equal(classes.has("error"), false);
 });
 
 test("connection test values come from the current form rather than saved settings", () => {

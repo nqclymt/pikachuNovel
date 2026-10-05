@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import time
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -290,3 +291,40 @@ def test_missing_binary_and_shell_wrapper_rejected(tmp_path):
         wrapper.write_text('@echo no')
         with pytest.raises(agy.AntigravityError, match='包装脚本'):
             agy._resolve_cli(str(wrapper))
+
+
+def test_cli_environment_uses_system_proxy_and_removes_api_keys(monkeypatch):
+    for key in (
+        'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy',
+        'ANTIGRAVITY_PROXY',
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv('GEMINI_API_KEY', 'not-for-agy')
+    monkeypatch.setenv('GOOGLE_API_KEY', 'not-for-agy')
+    monkeypatch.setattr(agy, '_system_proxy', lambda: 'http://127.0.0.1:7897')
+
+    env, source = agy._agy_environment()
+
+    assert source == 'system'
+    assert env['HTTP_PROXY'] == 'http://127.0.0.1:7897'
+    assert env['HTTPS_PROXY'] == 'http://127.0.0.1:7897'
+    assert 'GEMINI_API_KEY' not in env
+    assert 'GOOGLE_API_KEY' not in env
+
+
+def test_interactive_launch_uses_visible_terminal_without_shell(monkeypatch):
+    executable = str(Path('C:/Apps/agy.exe') if os.name == 'nt' else Path('/opt/agy'))
+    monkeypatch.setattr(agy, '_resolve_cli', lambda _: executable)
+    monkeypatch.setattr(agy, '_agy_environment', lambda: ({'HTTPS_PROXY': 'http://proxy'}, 'system'))
+    process = MagicMock(pid=321)
+    popen = MagicMock(return_value=process)
+    monkeypatch.setattr(agy.subprocess, 'Popen', popen)
+    if os.name != 'nt' and sys.platform != 'darwin':
+        monkeypatch.setattr(agy.shutil, 'which', lambda name: f'/usr/bin/{name}' if name == 'x-terminal-emulator' else None)
+
+    result = agy.launch_antigravity()
+
+    assert result == {'opened': True, 'path': executable, 'pid': 321, 'proxy': 'system'}
+    argv = popen.call_args.args[0]
+    assert executable in argv
+    assert popen.call_args.kwargs.get('shell') is not True

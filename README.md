@@ -188,7 +188,7 @@ Windows 10/11 通常已具备窗口所需的 WebView2 Runtime；若窗口创建�
 
 支持 Claude、GPT-4o、DeepSeek、Qwen 等主流模型。
 
-支持把官方 Antigravity CLI（`agy`）作为可选生成后端，使用 CLI 自己管理的 Google 登录。参考拆解、全书设计、写作生产和正文精修可以分别选择 API 或 Antigravity；项目继续负责小说记忆、任务编排、校验和保存。安装、登录及首次测试步骤见 [Antigravity 接入说明](docs/antigravity.md)。
+支持把官方 Antigravity CLI（`agy`）作为可选生成后端，使用 CLI 自己管理的 Google 登录。参考拆解、全书设计、写作生产和正文精修可以分别选择 API 或 Antigravity；项目继续负责小说记忆、任务编排、校验和保存。设置页可直接启动登录窗口，并自动把系统代理传给交互登录和 Headless 写作调用。安装、登录及首次测试步骤见 [Antigravity 接入说明](docs/antigravity.md)。
 
 ## 工作流程
 
@@ -265,7 +265,7 @@ ADAPTIVE_BUILDER_WIRE_API=chat_completions
 
 也可通过同名环境变量覆盖配置。三组配置可使用不同的模型、服务商和调用协议。普通兼容接口使用 `chat_completions`；Codex/Responses API 配置使用 `responses`。模型调用默认流式接收长响应，CC Switch 导入会保留并验证供应商的调用协议。CC Switch 还支持读取 Claude Desktop 和 Grok Build 的兼容网关配置。
 
-若使用 Antigravity，在设置中切换对应组的后端，或配置 `<组名前缀>_BACKEND=antigravity_cli`；CLI 不需要在本项目填写 API Key。先清空原 API 模型名，登录后再从 `agy models` 选择可用模型。Google AI Pro 的 Antigravity 配额与 Gemini API Key 计费不是同一调用方式，实际模型和配额以官方账户为准。完整字段与恢复流程见 [Antigravity 接入说明](docs/antigravity.md)。
+若使用 Antigravity，在设置中切换对应组的后端，点击“检测安装”和“启动/登录 agy”，或配置 `<组名前缀>_BACKEND=antigravity_cli`；CLI 不需要在本项目填写 API Key。先清空原 API 模型名，登录后再从 `agy models` 选择可用模型。Google AI Pro 的 Antigravity 配额与 Gemini API Key 计费不是同一调用方式，实际模型和配额以官方账户为准。完整字段与恢复流程见 [Antigravity 接入说明](docs/antigravity.md)。
 
 ## 快速开始
 
